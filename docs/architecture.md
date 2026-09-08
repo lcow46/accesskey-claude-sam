@@ -16,7 +16,7 @@ Access Key가 공격자에게 유출될 경우, 공격자는 이를 악용하여
 
 아래 구성도는 CloudTrail 로그 중앙 수집부터 이상탐지 알림 발송까지의 전체 흐름을 나타냅니다.
 
-> `docs/images/accesskey이상탐지-페이지-5.drawio.png` (구성도 이미지는 `docs/images/` 디렉터리에 추가 예정)
+![Access Key 이상탐지 아키텍처 구성도](images/architecture-diagram.svg)
 
 ### 1-3. 탐지 시나리오 목록
 
@@ -199,7 +199,9 @@ if event_name == "GetCallerIdentity":
 
 **알림 예시**
 
-> `docs/images/scenario1-alert.png` (Slack 알림 스크린샷 추가 예정)
+![시나리오 1 알림 예시](images/scenario1-alert.svg)
+
+*(실제 Slack 채널 캡처가 아닌, 알림 메시지 구성을 보여주기 위한 예시 이미지입니다.)*
 
 ### 3-2. 시나리오 2 — 권한 상승 시도 의심
 
@@ -236,7 +238,7 @@ if event_name in PRIVILEGE_ESCALATION_APIS and is_foreign_ip:
 
 **알림 예시**
 
-> `docs/images/scenario2-alert.png` (Slack 알림 스크린샷 추가 예정)
+![시나리오 2 알림 예시](images/scenario2-alert.svg)
 
 ### 3-3. 시나리오 3 — 짧은 시간 내 다수 AccessDenied
 
@@ -279,7 +281,7 @@ if error_count >= ERROR_THRESHOLD:
 
 **알림 예시**
 
-> `docs/images/scenario3-alert.png` (Slack 알림 스크린샷 추가 예정)
+![시나리오 3 알림 예시](images/scenario3-alert.svg)
 
 ### 3-4. 시나리오 4 — 비정상 리전 리소스 생성 의심
 
@@ -316,7 +318,7 @@ if event_name in RESOURCE_CREATE_APIS:
 
 **알림 예시**
 
-> `docs/images/scenario4-alert.png` (Slack 알림 스크린샷 추가 예정)
+![시나리오 4 알림 예시](images/scenario4-alert.svg)
 
 ### 3-5. 시나리오 5 — 정체불명 도구로 민감 API 호출
 
@@ -358,7 +360,7 @@ if any(sig in user_agent.lower() for sig in ATTACK_TOOL_SIGNATURES):
 
 **알림 예시**
 
-> `docs/images/scenario5-alert.png` (Slack 알림 스크린샷 추가 예정)
+![시나리오 5 알림 예시](images/scenario5-alert.svg)
 
 ## 4. 알림 수신 시 대응 절차
 

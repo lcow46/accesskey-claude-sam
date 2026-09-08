@@ -1,0 +1,102 @@
+<svg viewBox="0 0 1440 1150" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#455A64"/>
+  </marker>
+  <marker id="arrowDash" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#90A4AE"/>
+  </marker>
+</defs>
+<rect x="0" y="0" width="1440" height="1150" fill="#FFFFFF"/>
+<text x="720.0" y="34" font-family="Helvetica, Arial, sans-serif" font-size="23" font-weight="bold" fill="#263238" text-anchor="middle">AWS Access Key 이상탐지 아키텍처</text>
+<text x="720.0" y="56" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#546E7A" text-anchor="middle">CloudTrail 중앙 수집 → Reference Table 적재 → 이상탐지 → Slack 알림</text>
+<rect x="40" y="74" width="1360" height="130" rx="14" fill="#FAFAFA" stroke="#B0BEC5" stroke-width="1.6" stroke-dasharray="6,4"/>
+<text x="64" y="96" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#546E7A" text-anchor="start">Member Accounts (Organization 내 다수 계정)</text>
+<rect x="70" y="118" width="280" height="68" rx="10" fill="#FFFFFF" stroke="#90A4AE" stroke-width="1.6"/>
+<text x="210.0" y="148.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">Account #1</text>
+<text x="210.0" y="165.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">CloudTrail 이벤트</text>
+<rect x="390" y="118" width="280" height="68" rx="10" fill="#FFFFFF" stroke="#90A4AE" stroke-width="1.6"/>
+<text x="530.0" y="148.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">Account #2</text>
+<text x="530.0" y="165.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">CloudTrail 이벤트</text>
+<rect x="710" y="118" width="280" height="68" rx="10" fill="#FFFFFF" stroke="#90A4AE" stroke-width="1.6"/>
+<text x="850.0" y="148.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">Account #3</text>
+<text x="850.0" y="165.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">CloudTrail 이벤트</text>
+<rect x="1030" y="118" width="280" height="68" rx="10" fill="#FFFFFF" stroke="#90A4AE" stroke-width="1.6"/>
+<text x="1170.0" y="148.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">Account #N …</text>
+<text x="1170.0" y="165.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">CloudTrail 이벤트</text>
+<polyline points="210.0,186 210.0,200 720.0,218" fill="none" stroke="#455A64" stroke-width="1.6" marker-end="url(#arrow)"/>
+<polyline points="530.0,186 530.0,200 720.0,218" fill="none" stroke="#455A64" stroke-width="1.6" marker-end="url(#arrow)"/>
+<polyline points="850.0,186 850.0,200 720.0,218" fill="none" stroke="#455A64" stroke-width="1.6" marker-end="url(#arrow)"/>
+<polyline points="1170.0,186 1170.0,200 720.0,218" fill="none" stroke="#455A64" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="720.0" y1="218" x2="720.0" y2="246" stroke="#455A64" stroke-width="2.2" marker-end="url(#arrow)"/>
+<text x="734.0" y="229.0" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#546E7A" text-anchor="start">Organization Trail (모든 리전, 자동 수집)</text>
+<rect x="40" y="250" width="1360" height="108" rx="14" fill="#FAFAFA" stroke="#B0BEC5" stroke-width="1.6" stroke-dasharray="6,4"/>
+<text x="64" y="272" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#546E7A" text-anchor="start">Log Archive Account</text>
+<rect x="490.0" y="286" width="460" height="62" rx="10" fill="#FFF3E0" stroke="#FB8C00" stroke-width="1.6"/>
+<text x="720.0" y="313.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">중앙 S3 버킷</text>
+<text x="720.0" y="330.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">s3://{버킷}/o-{orgId}/AWSLogs/</text>
+<line x1="720.0" y1="348" x2="720.0" y2="412" stroke="#455A64" stroke-width="2.2" marker-end="url(#arrow)"/>
+<text x="734.0" y="380.0" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#546E7A" text-anchor="start">S3 Event Notification</text>
+<text x="734.0" y="398.0" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#546E7A" text-anchor="start">s3:ObjectCreated:Put · *.json.gz (Cross-Account)</text>
+<rect x="40" y="416" width="1360" height="494" rx="14" fill="#FAFAFA" stroke="#B0BEC5" stroke-width="1.6" stroke-dasharray="6,4"/>
+<text x="64" y="438" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#546E7A" text-anchor="start">Audit Account</text>
+<rect x="430.0" y="456" width="400" height="66" rx="10" fill="#EDE7F6" stroke="#7E57C2" stroke-width="1.6"/>
+<text x="630.0" y="485.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">ref-table-processor Lambda</text>
+<text x="630.0" y="502.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">(Python 3.14)</text>
+<rect x="870.0" y="456" width="230" height="66" rx="10" fill="#F1F8E9" stroke="#7CB342" stroke-width="1.6"/>
+<text x="985.0" y="484.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#263238" text-anchor="middle">GeoIP Lambda Layer</text>
+<text x="985.0" y="501.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#263238" text-anchor="middle">(GeoLite2-City.mmdb)</text>
+<line x1="830.0" y1="489.0" x2="870.0" y2="489.0" stroke="#7CB342" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="850.0" y="479.0" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#558B2F" text-anchor="middle">참조</text>
+<rect x="80.0" y="592" width="240" height="82" rx="10" fill="#E3F2FD" stroke="#1E88E5" stroke-width="1.6"/>
+<text x="200.0" y="620.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">ref_ip_country</text>
+<text x="200.0" y="637.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">sourceIPAddress</text>
+<text x="200.0" y="654.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">countryCode / city</text>
+<rect x="340.0" y="592" width="240" height="82" rx="10" fill="#E3F2FD" stroke="#1E88E5" stroke-width="1.6"/>
+<text x="460.0" y="629.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">ref_region</text>
+<text x="460.0" y="646.05" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">awsRegion</text>
+<rect x="600.0" y="592" width="240" height="82" rx="10" fill="#E3F2FD" stroke="#1E88E5" stroke-width="1.6"/>
+<text x="720.0" y="620.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">ref_user_agent</text>
+<text x="720.0" y="637.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">userAgent</text>
+<text x="720.0" y="654.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">userAgentType</text>
+<rect x="860.0" y="592" width="240" height="82" rx="10" fill="#E1F5FE" stroke="#0288D1" stroke-width="1.6"/>
+<text x="980.0" y="620.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">ref_error_event</text>
+<text x="980.0" y="637.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">eventName / errorCode</text>
+<text x="980.0" y="654.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">errorMessage</text>
+<rect x="932.0" y="567" width="96" height="22" rx="11" fill="#FFE0B2" stroke="#EF6C00" stroke-width="1.2"/>
+<text x="980.0" y="582" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="bold" fill="#EF6C00" text-anchor="middle">Streams ON</text>
+<rect x="1120.0" y="592" width="240" height="82" rx="10" fill="#E1F5FE" stroke="#0288D1" stroke-width="1.6"/>
+<text x="1240.0" y="620.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">ref_aws_api</text>
+<text x="1240.0" y="637.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">eventName</text>
+<text x="1240.0" y="654.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#263238" text-anchor="middle">eventSource</text>
+<rect x="1192.0" y="567" width="96" height="22" rx="11" fill="#FFE0B2" stroke="#EF6C00" stroke-width="1.2"/>
+<text x="1240.0" y="582" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="bold" fill="#EF6C00" text-anchor="middle">Streams ON</text>
+<polyline points="630.0,522 630.0,562 200.0,562 200.0,592" fill="none" stroke="#9575CD" stroke-width="1.4" marker-end="url(#arrow)"/>
+<polyline points="630.0,522 630.0,562 460.0,562 460.0,592" fill="none" stroke="#9575CD" stroke-width="1.4" marker-end="url(#arrow)"/>
+<polyline points="630.0,522 630.0,562 720.0,562 720.0,592" fill="none" stroke="#9575CD" stroke-width="1.4" marker-end="url(#arrow)"/>
+<polyline points="630.0,522 630.0,562 980.0,562 980.0,592" fill="none" stroke="#9575CD" stroke-width="1.4" marker-end="url(#arrow)"/>
+<polyline points="630.0,522 630.0,562 1240.0,562 1240.0,592" fill="none" stroke="#9575CD" stroke-width="1.4" marker-end="url(#arrow)"/>
+<text x="630.0" y="554" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#7E57C2" text-anchor="middle">AKIA 이벤트 파싱 · 적재 (5개 테이블)</text>
+<polyline points="980.0,674 980.0,724 720.0,724" fill="none" stroke="#0288D1" stroke-width="1.8" marker-end="none"/>
+<polyline points="1240.0,674 1240.0,724 720.0,724" fill="none" stroke="#0288D1" stroke-width="1.8" marker-end="none"/>
+<line x1="720.0" y1="724" x2="720.0" y2="764" stroke="#0288D1" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="736.0" y="714" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0277BD" text-anchor="start">DynamoDB Streams (INSERT)</text>
+<rect x="510.0" y="764" width="420" height="66" rx="10" fill="#EDE7F6" stroke="#7E57C2" stroke-width="1.6"/>
+<text x="720.0" y="793.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">ref-suspicious-detector Lambda</text>
+<text x="720.0" y="810.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">(Python 3.14)</text>
+<polyline points="530.0,764 530.0,744 200.0,694 200.0,674" fill="none" stroke="#90A4AE" stroke-width="1.3" stroke-dasharray="5,4" marker-end="url(#arrowDash)"/>
+<polyline points="540.0,764 540.0,744 460.0,694 460.0,674" fill="none" stroke="#90A4AE" stroke-width="1.3" stroke-dasharray="5,4" marker-end="url(#arrowDash)"/>
+<polyline points="550.0,764 550.0,744 720.0,694 720.0,674" fill="none" stroke="#90A4AE" stroke-width="1.3" stroke-dasharray="5,4" marker-end="url(#arrowDash)"/>
+<text x="506.0" y="738" font-family="Helvetica, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#546E7A" text-anchor="end">조회 (Query)</text>
+<text x="720.0" y="856" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#546E7A" text-anchor="middle">시나리오 1·2·4·5 평가 (ref_aws_api)   ·   시나리오 3 평가 (ref_error_event)</text>
+<line x1="720.0" y1="870" x2="720.0" y2="952" stroke="#455A64" stroke-width="2.2" marker-end="url(#arrow)"/>
+<text x="734.0" y="917.0" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="#546E7A" text-anchor="start">조건 충족 시 Slack API 알림</text>
+<rect x="530.0" y="956" width="380" height="62" rx="10" fill="#F3E5F5" stroke="#8E24AA" stroke-width="1.6"/>
+<text x="720.0" y="983.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">Slack Channel</text>
+<text x="720.0" y="1000.225" font-family="Helvetica, Arial, sans-serif" font-size="13.5" font-weight="bold" fill="#263238" text-anchor="middle">(#security-alerts)</text>
+<line x1="720.0" y1="1018" x2="720.0" y2="1060" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="734.0" y="1045.0" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#546E7A" text-anchor="start">확인 및 초동 대응</text>
+<rect x="530.0" y="1064" width="380" height="56" rx="10" fill="#ECEFF1" stroke="#607D8B" stroke-width="1.6"/>
+<text x="720.0" y="1087.875" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" fill="#263238" text-anchor="middle">보안 담당자</text>
+<text x="720.0" y="1104.875" font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" fill="#263238" text-anchor="middle">Access Key 비활성화 · 세션 토큰 무효화</text>
+</svg>
