@@ -22,3 +22,18 @@ CloudTrail 이벤트를 실시간으로 수집·분석하여 사전 정의된 5�
 - `ref-suspicious-detector` Lambda (Python 3.14) + DynamoDB Streams + Slack 알림
 
 전체 구성요소, 탐지 시나리오별 상세 로직, 대응 절차, 운영 가이드는 [docs/architecture.md](docs/architecture.md)에 정리되어 있습니다.
+
+## AWS SAM으로 배포하기
+
+이 저장소는 위 아키텍처 중 Audit 계정 구성요소(Lambda 3종, DynamoDB Reference Table 5종, DynamoDB
+Streams, Slack 연동)를 AWS SAM 프로젝트로 구현한 `template.yaml`과 Lambda 소스(`src/`)를 포함하고
+있습니다. Organization Trail이 없어도 자체 S3 버킷+CloudTrail로 엔드투엔드 테스트가 가능한 데모
+모드를 지원합니다.
+
+```bash
+sam build
+sam deploy --guided
+```
+
+자세한 사전 준비물, 파라미터 설명, 배포 후 수동 설정, 로컬 테스트, 트러블슈팅은
+[docs/sam-deployment-guide.md](docs/sam-deployment-guide.md)를 참고하세요.

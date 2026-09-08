@@ -1,0 +1,30 @@
+{
+  "Records": [
+    {
+      "eventID": "1",
+      "eventName": "INSERT",
+      "eventVersion": "1.1",
+      "eventSource": "aws:dynamodb",
+      "awsRegion": "ap-northeast-2",
+      "eventSourceARN": "arn:aws:dynamodb:ap-northeast-2:123456789012:table/ref_aws_api-dev/stream/2026-09-08T03:00:00.000",
+      "dynamodb": {
+        "ApproximateCreationDateTime": 1757300000,
+        "Keys": {
+          "accessKeyId": { "S": "AKIAEXAMPLE00000000" },
+          "eventTime#eventId": { "S": "2026-09-08T03:14:02Z#11111111-2222-3333-4444-555555555555" }
+        },
+        "NewImage": {
+          "accessKeyId": { "S": "AKIAEXAMPLE00000000" },
+          "eventTime#eventId": { "S": "2026-09-08T03:14:02Z#11111111-2222-3333-4444-555555555555" },
+          "eventName": { "S": "GetCallerIdentity" },
+          "eventSource": { "S": "sts.amazonaws.com" },
+          "ttl": { "N": "1757904800" }
+        },
+        "SequenceNumber": "100000000000000000001",
+        "SizeBytes": 120,
+        "StreamViewType": "NEW_IMAGE"
+      },
+      "eventSourceARNSuffix": "ref_aws_api-dev"
+    }
+  ]
+}

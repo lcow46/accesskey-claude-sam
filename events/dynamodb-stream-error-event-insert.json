@@ -1,0 +1,31 @@
+{
+  "Records": [
+    {
+      "eventID": "1",
+      "eventName": "INSERT",
+      "eventVersion": "1.1",
+      "eventSource": "aws:dynamodb",
+      "awsRegion": "ap-northeast-2",
+      "eventSourceARN": "arn:aws:dynamodb:ap-northeast-2:123456789012:table/ref_error_event-dev/stream/2026-09-08T03:00:00.000",
+      "dynamodb": {
+        "ApproximateCreationDateTime": 1757300350,
+        "Keys": {
+          "accessKeyId": { "S": "AKIAEXAMPLE00000000" },
+          "eventTime#eventId": { "S": "2026-09-08T03:19:10Z#66666666-7777-8888-9999-000000000000" }
+        },
+        "NewImage": {
+          "accessKeyId": { "S": "AKIAEXAMPLE00000000" },
+          "eventTime#eventId": { "S": "2026-09-08T03:19:10Z#66666666-7777-8888-9999-000000000000" },
+          "eventName": { "S": "ListBuckets" },
+          "errorCode": { "S": "AccessDenied" },
+          "errorMessage": { "S": "User is not authorized to perform this action" },
+          "ttl": { "N": "1757905150" }
+        },
+        "SequenceNumber": "100000000000000000002",
+        "SizeBytes": 150,
+        "StreamViewType": "NEW_IMAGE"
+      },
+      "eventSourceARNSuffix": "ref_error_event-dev"
+    }
+  ]
+}

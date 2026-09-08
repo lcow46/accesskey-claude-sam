@@ -1,0 +1,468 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS Access Key 이상탐지 아키텍처 (ref-table-processor, ref-suspicious-detector,
+  geoip-layer-builder) - CloudTrail 이벤트 수집부터 Slack 알림까지의 Audit 계정 구성요소.
+
+# -----------------------------------------------------------------------
+# Parameters
+# -----------------------------------------------------------------------
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    Description: 배포 스테이지 구분자. 리소스 물리 이름(테이블명, 함수명 등)에 접미사로 사용됩니다.
+
+  SlackChannelId:
+    Type: String
+    Description: "탐지 알림을 받을 Slack 채널 ID (예: C0123456789)"
+
+  SlackSecretName:
+    Type: String
+    Default: accesskey-detector/slack-bot-token
+    Description: >
+      Slack Bot Token이 저장된 Secrets Manager 시크릿 이름.
+      { "slack_bot_token": "xoxb-..." } 형태의 JSON으로 미리 생성되어 있어야 합니다.
+
+  MaxMindSecretName:
+    Type: String
+    Default: accesskey-detector/maxmind-license-key
+    Description: >
+      MaxMind GeoLite2 라이선스 키가 저장된 Secrets Manager 시크릿 이름.
+      { "MAXMIND_LICENSE_KEY": "..." } 형태의 JSON으로 미리 생성되어 있어야 합니다.
+
+  AllowedCountries:
+    Type: String
+    Default: "KR"
+    Description: 허용 국가코드 목록 (콤마 구분, 예 "KR,US")
+
+  AllowedRegions:
+    Type: String
+    Default: "ap-northeast-2"
+    Description: 허용 AWS 리전 목록 (콤마 구분, 예 "ap-northeast-2,us-east-1")
+
+  ErrorThreshold:
+    Type: Number
+    Default: 5
+    Description: 시나리오 3 - 시간 윈도우 내 AccessDenied 임계값
+
+  ErrorWindowMinutes:
+    Type: Number
+    Default: 5
+    Description: 시나리오 3 - AccessDenied 탐지 시간 윈도우(분)
+
+  GeoIpUpdateSchedule:
+    Type: String
+    Default: rate(7 days)
+    Description: geoip-layer-builder를 주기 실행할 EventBridge 스케줄 표현식
+
+  DeployDemoCloudTrail:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      "true"이면 이 스택이 자체 S3 버킷 + CloudTrail(단일 계정)을 생성하여 별도 Organization
+      환경 없이도 엔드투엔드로 테스트할 수 있게 합니다. Control Tower/Organization Trail을
+      이미 운영 중이라면 "false"로 설정하고 ExistingCloudTrailBucketName 등을 채워주세요.
+
+  ExistingCloudTrailBucketName:
+    Type: String
+    Default: ""
+    Description: >
+      DeployDemoCloudTrail=false일 때 사용할, 이미 존재하는 중앙 CloudTrail S3 버킷 이름
+      (Log Archive 계정의 버킷). Organization Trail 환경에서는 크로스 계정 버킷입니다.
+
+  ExistingCloudTrailBucketAccountId:
+    Type: String
+    Default: "000000000000"
+    AllowedPattern: "^[0-9]{12}$"
+    Description: >
+      DeployDemoCloudTrail=false일 때 반드시 실제 값으로 지정해야 하는, 위 버킷을 소유한
+      AWS 계정 ID (S3 → Lambda invoke 권한의 SourceAccount 조건에 사용되어 confused-deputy를
+      방지합니다). 기본값 000000000000은 데모 모드에서는 사용되지 않는 자리표시자입니다.
+
+Conditions:
+  IsDemoMode: !Equals [!Ref DeployDemoCloudTrail, "true"]
+  IsNotDemoMode: !Not [!Equals [!Ref DeployDemoCloudTrail, "true"]]
+
+# -----------------------------------------------------------------------
+# Globals
+# -----------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures: [x86_64]
+    Timeout: 30
+    MemorySize: 256
+    Tracing: PassThrough
+
+# -----------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------
+Resources:
+
+  # ---------------------------------------------------------------------
+  # Reference Table (DynamoDB) 5종 - 공통 키: accessKeyId / eventTime#eventId
+  # ---------------------------------------------------------------------
+  RefIpCountryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_ip_country-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: accessKeyId
+          AttributeType: S
+        - AttributeName: "eventTime#eventId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessKeyId
+          KeyType: HASH
+        - AttributeName: "eventTime#eventId"
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  RefRegionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_region-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: accessKeyId
+          AttributeType: S
+        - AttributeName: "eventTime#eventId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessKeyId
+          KeyType: HASH
+        - AttributeName: "eventTime#eventId"
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  RefUserAgentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_user_agent-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: accessKeyId
+          AttributeType: S
+        - AttributeName: "eventTime#eventId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessKeyId
+          KeyType: HASH
+        - AttributeName: "eventTime#eventId"
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # Streams 활성화 대상 (시나리오 3의 트리거)
+  RefErrorEventTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_error_event-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: accessKeyId
+          AttributeType: S
+        - AttributeName: "eventTime#eventId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessKeyId
+          KeyType: HASH
+        - AttributeName: "eventTime#eventId"
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+
+  # Streams 활성화 대상 (시나리오 1, 2, 4, 5의 트리거)
+  RefAwsApiTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_aws_api-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: accessKeyId
+          AttributeType: S
+        - AttributeName: "eventTime#eventId"
+          AttributeType: S
+      KeySchema:
+        - AttributeName: accessKeyId
+          KeyType: HASH
+        - AttributeName: "eventTime#eventId"
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+
+  # ---------------------------------------------------------------------
+  # ref-table-processor : S3(CloudTrail 로그) → Reference Table 적재
+  # GeoIP mmdb Lambda Layer는 geoip-layer-builder가 런타임에 동적으로 발행/연결하므로
+  # 이 함수 정의에는 Layers를 선언하지 않습니다 (선언 시 매 배포마다 CloudFormation이
+  # 동적으로 붙은 Layer를 초기화해버립니다). geoip2/maxminddb 파이썬 라이브러리는
+  # requirements.txt로 함수 자체 패키지에 포함됩니다.
+  # ---------------------------------------------------------------------
+  RefTableProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ref-table-processor-${Stage}"
+      Description: CloudTrail 로그 파일을 파싱하여 Reference Table 5종에 적재
+      CodeUri: src/ref_table_processor/
+      Handler: app.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          ERROR_EVENT_TABLE: !Ref RefErrorEventTable
+          IP_COUNTRY_TABLE: !Ref RefIpCountryTable
+          AWS_API_TABLE: !Ref RefAwsApiTable
+          REGION_TABLE: !Ref RefRegionTable
+          USER_AGENT_TABLE: !Ref RefUserAgentTable
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref RefIpCountryTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref RefRegionTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref RefUserAgentTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref RefErrorEventTable
+        - DynamoDBWritePolicy:
+            TableName: !Ref RefAwsApiTable
+        - S3ReadPolicy:
+            BucketName: !If
+              - IsDemoMode
+              - !Sub "accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
+              - !Ref ExistingCloudTrailBucketName
+
+  # S3(Log Archive 버킷) → Lambda invoke 권한 - 데모 모드 (같은 계정)
+  RefTableProcessorInvokePermissionDemo:
+    Type: AWS::Lambda::Permission
+    Condition: IsDemoMode
+    Properties:
+      FunctionName: !Ref RefTableProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
+      SourceAccount: !Ref AWS::AccountId
+
+  # S3(Log Archive 버킷) → Lambda invoke 권한 - 기존 중앙 버킷 사용 (크로스 계정 가능)
+  # 실제 S3 이벤트 알림 설정은 버킷을 소유한 계정에서 별도로 등록해야 합니다. (배포 가이드 참고)
+  RefTableProcessorInvokePermissionExisting:
+    Type: AWS::Lambda::Permission
+    Condition: IsNotDemoMode
+    Properties:
+      FunctionName: !Ref RefTableProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::${ExistingCloudTrailBucketName}"
+      SourceAccount: !Ref ExistingCloudTrailBucketAccountId
+
+  # ---------------------------------------------------------------------
+  # 데모 모드: 자체 S3 버킷 + 단일 계정 CloudTrail
+  # (Organization Trail이 없는 개인/테스트 환경에서 엔드투엔드 검증용)
+  # ---------------------------------------------------------------------
+  DemoCloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Condition: IsDemoMode
+    DependsOn: RefTableProcessorInvokePermissionDemo
+    Properties:
+      BucketName: !Sub "accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Function: !GetAtt RefTableProcessorFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json.gz
+
+  DemoCloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: IsDemoMode
+    Properties:
+      Bucket: !Ref DemoCloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt DemoCloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${DemoCloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  DemoCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Condition: IsDemoMode
+    DependsOn: DemoCloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub "accesskey-detector-demo-${Stage}"
+      S3BucketName: !Ref DemoCloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+  # ---------------------------------------------------------------------
+  # ref-suspicious-detector : DynamoDB Streams(ref_aws_api, ref_error_event)
+  # → 탐지 시나리오 평가 → Slack 알림
+  # ---------------------------------------------------------------------
+  RefSuspiciousDetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ref-suspicious-detector-${Stage}"
+      Description: Reference Table Streams를 기반으로 이상탐지 시나리오를 평가하고 Slack 알림 발송
+      CodeUri: src/suspicious_detector/
+      Handler: app.lambda_handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          IP_COUNTRY_TABLE: !Ref RefIpCountryTable
+          REGION_TABLE: !Ref RefRegionTable
+          USER_AGENT_TABLE: !Ref RefUserAgentTable
+          ERROR_EVENT_TABLE: !Ref RefErrorEventTable
+          AWS_API_TABLE: !Ref RefAwsApiTable
+          SLACK_CHANNEL_ID: !Ref SlackChannelId
+          SLACK_SECRET_NAME: !Ref SlackSecretName
+          ALLOWED_COUNTRIES: !Ref AllowedCountries
+          ALLOWED_REGIONS: !Ref AllowedRegions
+          ERROR_THRESHOLD: !Ref ErrorThreshold
+          ERROR_WINDOW_MIN: !Ref ErrorWindowMinutes
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref RefIpCountryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref RefRegionTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref RefUserAgentTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref RefErrorEventTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref RefAwsApiTable
+        - Statement:
+            - Sid: GetSlackSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SlackSecretName}-*"
+      Events:
+        AwsApiStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RefAwsApiTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            MaximumRetryAttempts: 2
+            BisectBatchOnFunctionError: true
+        ErrorEventStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt RefErrorEventTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            MaximumRetryAttempts: 2
+            BisectBatchOnFunctionError: true
+
+  # ---------------------------------------------------------------------
+  # geoip-layer-builder : MaxMind GeoLite2-City.mmdb 신규 버전 감지 시
+  # Lambda Layer로 발행 후 ref-table-processor에 자동 연결 (주기 실행)
+  # ---------------------------------------------------------------------
+  GeoIpLayerBuilderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "geoip-layer-builder-${Stage}"
+      Description: MaxMind GeoLite2-City.mmdb 갱신 여부를 확인하여 Lambda Layer로 재발행
+      CodeUri: src/geoip_layer_builder/
+      Handler: app.lambda_handler
+      Timeout: 300
+      MemorySize: 512
+      EphemeralStorage:
+        Size: 1024
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref MaxMindSecretName
+          LAYER_NAME: !Sub "geoip-mmdb-${Stage}"
+          PROCESSOR_FUNCTION_NAME: !Ref RefTableProcessorFunction
+      Policies:
+        - Statement:
+            - Sid: GetMaxMindSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${MaxMindSecretName}-*"
+            - Sid: ManageGeoIpLayer
+              Effect: Allow
+              Action:
+                - lambda:ListLayerVersions
+                - lambda:PublishLayerVersion
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:geoip-mmdb-${Stage}*"
+            - Sid: AttachLayerToProcessor
+              Effect: Allow
+              Action:
+                - lambda:GetFunctionConfiguration
+                - lambda:UpdateFunctionConfiguration
+              Resource: !GetAtt RefTableProcessorFunction.Arn
+      Events:
+        ScheduledUpdate:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref GeoIpUpdateSchedule
+            Description: GeoLite2-City.mmdb 최신 버전 주기 확인
+            Enabled: true
+
+# -----------------------------------------------------------------------
+# Outputs
+# -----------------------------------------------------------------------
+Outputs:
+  RefTableProcessorFunctionName:
+    Value: !Ref RefTableProcessorFunction
+  RefTableProcessorFunctionArn:
+    Value: !GetAtt RefTableProcessorFunction.Arn
+  RefSuspiciousDetectorFunctionName:
+    Value: !Ref RefSuspiciousDetectorFunction
+  GeoIpLayerBuilderFunctionName:
+    Value: !Ref GeoIpLayerBuilderFunction
+  RefIpCountryTableName:
+    Value: !Ref RefIpCountryTable
+  RefRegionTableName:
+    Value: !Ref RefRegionTable
+  RefUserAgentTableName:
+    Value: !Ref RefUserAgentTable
+  RefErrorEventTableName:
+    Value: !Ref RefErrorEventTable
+  RefAwsApiTableName:
+    Value: !Ref RefAwsApiTable
+  DemoCloudTrailBucketName:
+    Condition: IsDemoMode
+    Value: !Ref DemoCloudTrailBucket
