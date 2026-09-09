@@ -154,9 +154,9 @@ DynamoDB Streams는 테이블에 데이터 변경(INSERT/UPDATE/DELETE)이 발�
 | `ERROR_THRESHOLD` | 시나리오 3 AccessDenied 임계값 (기본값: 5) |
 | `ERROR_WINDOW_MIN` | 시나리오 3 탐지 시간 윈도우 (기본값: 5분) |
 
-#### Slack 알림 연동
+#### Slack / Teams 알림 연동
 
-탐지 시나리오 조건이 충족되면 `ref-suspicious-detector` Lambda가 Slack API를 활용하여 지정된 채널로 알림 메시지를 발송합니다.
+탐지 시나리오 조건이 충족되면 `ref-suspicious-detector` Lambda가 지정된 채널로 알림 메시지를 발송합니다. 이 문서의 예시는 Slack 기준으로 작성되어 있으나, SAM 구현체는 `NOTIFICATION_PROVIDER` 설정으로 Slack API(`chat.postMessage`)와 Microsoft Teams Webhook 중 선택해 발송할 수 있습니다. 고객사 환경에 맞는 채널별 설정은 [docs/notifications/slack.md](notifications/slack.md), [docs/notifications/teams.md](notifications/teams.md)를 참고하세요.
 
 ## 3. 탐지 시나리오 상세
 

@@ -1,8 +1,14 @@
 # AWS SAM 배포 가이드
 
 이 문서는 [docs/architecture.md](architecture.md)에서 설명한 Access Key 이상탐지 아키텍처 중
-**Audit 계정 구성요소**(3개 Lambda, DynamoDB Reference Table 5종, DynamoDB Streams, Slack 연동)를
+**Audit 계정 구성요소**(3개 Lambda, DynamoDB Reference Table 5종, DynamoDB Streams, 알림 연동)를
 AWS SAM CLI로 빌드·배포하는 방법을 처음부터 끝까지 안내합니다.
+
+> 알림 채널은 Slack 또는 Microsoft Teams 중 선택할 수 있습니다(`NotificationProvider` 파라미터).
+> 이 문서는 두 채널에 공통되는 빌드/배포 절차를 다루고, 채널별로 다른 사전 준비·파라미터 값·
+> 트러블슈팅은 [docs/notifications/slack.md](notifications/slack.md) /
+> [docs/notifications/teams.md](notifications/teams.md)에 각각 정리했습니다. 3단계(Secrets Manager
+> 준비)와 5단계(배포 파라미터)를 진행하기 전에 사용할 채널의 문서를 먼저 읽어주세요.
 
 ## 0. 이 SAM 앱이 배포하는 범위
 
@@ -12,7 +18,7 @@ Control Tower / Organization Trail 자체는 조직 전체에 걸친 별도 설�
 | 리소스 | 설명 |
 |---|---|
 | `ref-table-processor` Lambda | S3(CloudTrail 로그) → Reference Table 5종 적재 |
-| `ref-suspicious-detector` Lambda | DynamoDB Streams → 탐지 시나리오 평가 → Slack 알림 |
+| `ref-suspicious-detector` Lambda | DynamoDB Streams → 탐지 시나리오 평가 → Slack/Teams 알림 |
 | `geoip-layer-builder` Lambda | MaxMind mmdb 갱신 확인 → Lambda Layer 재발행 → `ref-table-processor`에 자동 연결 (주기 실행) |
 | DynamoDB 테이블 5종 | `ref_ip_country`, `ref_region`, `ref_user_agent`, `ref_error_event`, `ref_aws_api` |
 | (선택) 데모용 S3 버킷 + CloudTrail | Organization 환경이 없어도 엔드투엔드로 테스트할 수 있도록 하는 옵션 |
@@ -64,11 +70,13 @@ python3 --version
   - Docker가 있다면 `sam build --use-container` 사용 (컨테이너 안의 Lambda 런타임 이미지로 빌드하므로 로컬 Python 버전과 무관)
   - 아직 사용 중인 리전/계정에서 `python3.14` Lambda 런타임이 제공되지 않는다면, `template.yaml`의 `Globals.Function.Runtime`을 `python3.13`으로 낮추세요.
 
-### 1-4. Slack App 준비
+### 1-4. 알림 채널 준비 (Slack 또는 Teams)
 
-1. Slack workspace에 Bot을 하나 만들고 `chat:write` 권한을 부여합니다.
-2. Bot을 알림을 받을 채널에 초대합니다.
-3. Bot User OAuth Token(`xoxb-`로 시작)과 채널 ID를 확보해둡니다. (채널 ID는 Slack 채널 정보 하단에서 확인 가능)
+사용할 채널에 맞는 문서를 먼저 진행해서 알림 자격 증명(Slack Bot Token 또는 Teams Webhook
+URL)을 확보해두세요.
+
+- Slack을 사용한다면 → [docs/notifications/slack.md](notifications/slack.md)
+- Microsoft Teams를 사용한다면 → [docs/notifications/teams.md](notifications/teams.md)
 
 ### 1-5. MaxMind 계정 준비
 
@@ -97,14 +105,15 @@ accesskey-claude-sam/
 
 ## 3. 배포 전 준비: Secrets Manager 시크릿 생성
 
-Slack 토큰과 MaxMind 라이선스 키는 절대 `template.yaml`이나 파라미터에 평문으로 넣지 않고,
-**미리 Secrets Manager에 직접 생성**합니다. 아래 명령을 실제 값으로 바꿔서 실행하세요.
+알림 자격 증명(Slack Bot Token 또는 Teams Webhook URL)과 MaxMind 라이선스 키는 절대
+`template.yaml`이나 파라미터에 평문으로 넣지 않고, **미리 Secrets Manager에 직접 생성**합니다.
 
-```bash
-aws secretsmanager create-secret \
-  --name "accesskey-detector/slack-bot-token" \
-  --secret-string '{"slack_bot_token":"xoxb-여기에-실제-토큰"}'
-```
+알림 채널용 시크릿 생성 명령은 채널마다 시크릿 값의 JSON 형태가 다르므로
+[docs/notifications/slack.md](notifications/slack.md) 또는
+[docs/notifications/teams.md](notifications/teams.md)의 "Secrets Manager 시크릿 생성" 절을
+참고하세요. (시크릿 이름 기본값: `accesskey-detector/notification-credential`)
+
+MaxMind 라이선스 키는 채널과 무관하게 공통으로 아래처럼 생성합니다.
 
 ```bash
 aws secretsmanager create-secret \
@@ -112,8 +121,8 @@ aws secretsmanager create-secret \
   --secret-string '{"MAXMIND_LICENSE_KEY":"여기에-실제-라이선스키"}'
 ```
 
-시크릿 이름을 위 기본값과 다르게 만들었다면, 배포 시 `SlackSecretName` / `MaxMindSecretName`
-파라미터로 그 이름을 지정하면 됩니다.
+시크릿 이름을 위 기본값과 다르게 만들었다면, 배포 시 `NotificationSecretName` /
+`MaxMindSecretName` 파라미터로 그 이름을 지정하면 됩니다.
 
 ## 4. 빌드
 
@@ -147,8 +156,9 @@ sam deploy --guided
 | Stack Name | 예: `accesskey-anomaly-detector` |
 | AWS Region | 예: `ap-northeast-2` |
 | Parameter Stage | `dev`, `prod` 등 환경 구분자 |
-| Parameter SlackChannelId | Slack 채널 ID (예: `C0123456789`) |
-| Parameter SlackSecretName | 3단계에서 만든 시크릿 이름 (기본값 그대로 써도 됨) |
+| Parameter NotificationProvider | `slack` 또는 `teams` |
+| Parameter SlackChannelId | Slack 채널 ID (예: `C0123456789`). `NotificationProvider=teams`면 비워둠 |
+| Parameter NotificationSecretName | 3단계에서 만든 알림 자격 증명 시크릿 이름 (기본값 그대로 써도 됨) |
 | Parameter MaxMindSecretName | 3단계에서 만든 시크릿 이름 (기본값 그대로 써도 됨) |
 | Parameter AllowedCountries | 허용 국가코드, 콤마 구분 (예: `KR`) |
 | Parameter AllowedRegions | 허용 리전, 콤마 구분 (예: `ap-northeast-2`) |
@@ -301,12 +311,14 @@ sam logs -n ref-table-processor-<Stage값> --stack-name <스택이름> --tail
 sam logs -n ref-suspicious-detector-<Stage값> --stack-name <스택이름> --tail
 ```
 
-### 8-4. Slack 알림 테스트
+### 8-4. 알림 발송 테스트
 
 허용 국가 외부에서 호출한 것처럼 조건을 맞추기는 어려우므로, 가장 쉬운 검증 방법은 `ALLOWED_COUNTRIES`
 환경변수를 일부러 실제 발신 국가와 다르게 좁혀서(예: 테스트 동안만 `US`로) `sam deploy`를 다시
-실행한 뒤, `GetCallerIdentity`를 호출해보고 시나리오 1 알림이 Slack에 오는지 확인하는 것입니다.
-확인 후에는 반드시 원래 값으로 되돌려서 재배포하세요.
+실행한 뒤, `GetCallerIdentity`를 호출해보고 시나리오 1 알림이 오는지 확인하는 것입니다. 확인 후에는
+반드시 원래 값으로 되돌려서 재배포하세요. 채널별 세부 테스트 방법은
+[docs/notifications/slack.md](notifications/slack.md) /
+[docs/notifications/teams.md](notifications/teams.md)의 "동작 확인" 절을 참고하세요.
 
 ## 9. 로컬 테스트 (`sam local invoke`)
 
@@ -363,7 +375,7 @@ sam delete
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 트리거되지 않음 (기존 버킷 모드) | 6-2절의 두 수동 단계(버킷 정책, 알림 등록)가 Log Archive 계정에서 실제로 적용됐는지 확인 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
-| Slack 알림이 안 옴 | `SLACK_SECRET_NAME`이 가리키는 시크릿의 JSON 키가 정확히 `slack_bot_token`인지, Bot이 해당 채널에 초대되어 있는지, CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그 확인 |
+| 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
 | `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
 
 ## 12. 원본 Lambda 코드 대비 변경 사항
@@ -375,14 +387,19 @@ sam delete
 1. `suspicious-detector.py`: `ref_ip_country` 등 5개 테이블명 하드코딩 → `ref-table-processor.py`와
    동일하게 환경변수(`IP_COUNTRY_TABLE` 등)로 변경
 2. `suspicious-detector.py`: Slack 토큰 시크릿 이름 하드코딩(`msu-security-event-app-token`) →
-   환경변수 `SLACK_SECRET_NAME`으로 변경
-3. `suspicious-detector.py`, `geoip-layer-builder.py`: `boto3.client(..., region_name="ap-northeast-2")`
+   환경변수 `NOTIFICATION_SECRET_NAME`으로 변경
+3. `suspicious-detector.py`: Slack 전용으로 되어있던 알림 발송 로직을 `NOTIFICATION_PROVIDER`
+   환경변수(`slack` 기본값 / `teams`)로 분기하도록 리팩터링. 탐지 조건/임계값 로직은 변경 없이
+   알림 페이로드 구성과 전송 부분만 provider별로 분리했습니다. 자세한 내용은
+   [docs/notifications/slack.md](notifications/slack.md), [docs/notifications/teams.md](notifications/teams.md)
+   참고.
+4. `suspicious-detector.py`, `geoip-layer-builder.py`: `boto3.client(..., region_name="ap-northeast-2")`
    하드코딩 제거 → Lambda 실행 리전을 자동으로 사용하도록 변경 (다른 리전 배포 가능하게)
-4. `geoip-layer-builder.py`: `FunctionName="ref-table-processor"` 하드코딩 → 환경변수
+5. `geoip-layer-builder.py`: `FunctionName="ref-table-processor"` 하드코딩 → 환경변수
    `PROCESSOR_FUNCTION_NAME`으로 변경
-5. `geoip-layer-builder.py`: `LAYER_NAME = "geoip-mmdb"` 상수 → 환경변수 `LAYER_NAME`으로 변경
+6. `geoip-layer-builder.py`: `LAYER_NAME = "geoip-mmdb"` 상수 → 환경변수 `LAYER_NAME`으로 변경
    (스테이지별로 다른 이름을 써서 dev/prod 동시 배포 시 충돌 방지)
-6. `geoip-layer-builder.py`: `publish_layer()`의 `CompatibleRuntimes=["python3.12"]` →
+7. `geoip-layer-builder.py`: `publish_layer()`의 `CompatibleRuntimes=["python3.12"]` →
    `["python3.13", "python3.14"]`로 갱신 (함수 런타임과 불일치 시 Layer 연결 실패 가능성 방지)
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**

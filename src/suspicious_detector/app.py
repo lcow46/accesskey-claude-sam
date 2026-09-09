@@ -19,20 +19,31 @@ user_agent_table  = dynamodb.Table(os.environ["USER_AGENT_TABLE"])
 error_event_table = dynamodb.Table(os.environ["ERROR_EVENT_TABLE"])
 aws_api_table     = dynamodb.Table(os.environ["AWS_API_TABLE"])
 
-def get_slack_token() -> str:
-    secret_name = os.environ["SLACK_SECRET_NAME"]
+# 알림 채널: "slack" (기본) 또는 "teams"
+NOTIFICATION_PROVIDER = os.environ.get("NOTIFICATION_PROVIDER", "slack").strip().lower()
+
+
+def get_notification_credential() -> str:
+    """
+    provider별 시크릿 형식:
+      - slack: {"slack_bot_token": "xoxb-..."}
+      - teams: {"teams_webhook_url": "https://.../workflows/..."}
+    """
+    secret_name = os.environ["NOTIFICATION_SECRET_NAME"]
     client = boto3.client(service_name="secretsmanager")
     try:
         response = client.get_secret_value(SecretId=secret_name)
         secret_data = json.loads(response["SecretString"])
+        if NOTIFICATION_PROVIDER == "teams":
+            return secret_data.get("teams_webhook_url")
         return secret_data.get("slack_bot_token")
     except ClientError as e:
         logger.error(f"Secrets Manager 에러 발생: {e}")
         raise e
 
 
-SLACK_BOT_TOKEN   = get_slack_token()
-SLACK_CHANNEL_ID  = os.environ["SLACK_CHANNEL_ID"]
+NOTIFICATION_CREDENTIAL = get_notification_credential()
+SLACK_CHANNEL_ID  = os.environ.get("SLACK_CHANNEL_ID", "")  # provider=slack일 때만 사용
 ALLOWED_COUNTRIES = set(os.environ.get("ALLOWED_COUNTRIES", "KR").split(","))
 ALLOWED_REGIONS   = set(os.environ.get("ALLOWED_REGIONS", "ap-northeast-2").split(","))
 ERROR_THRESHOLD   = int(os.environ.get("ERROR_THRESHOLD", "5"))
@@ -162,7 +173,7 @@ def handle_aws_api_event(image: dict):
         })
 
     for alert in alerts:
-        send_slack_alert(
+        send_scenario_alert(
             access_key_id=access_key_id,
             event_name=event_name,
             event_source=event_source,
@@ -215,7 +226,7 @@ def handle_error_event(image: dict):
         )
         recent_apis = [item.get("eventName", "") for item in api_response.get("Items", [])]
 
-        send_slack_alert_scenario3(
+        send_scenario3_alert(
             access_key_id=access_key_id,
             event_time=event_time,
             error_count=error_count,
@@ -277,9 +288,18 @@ def check_night_time(event_time: str) -> bool:
         return False
 
 
-# Slack 알림
+def to_kst(event_time: str) -> str:
+    try:
+        dt_utc = datetime.strptime(event_time, "%Y-%m-%dT%H:%M:%SZ")
+        return (dt_utc + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return event_time
 
-def send_slack_alert(
+
+# -----------------------------------------------------------------------
+# 알림 발송 (Slack / Teams 공통 처리)
+# -----------------------------------------------------------------------
+def send_scenario_alert(
     access_key_id: str,
     event_name: str,
     event_source: str,
@@ -290,27 +310,57 @@ def send_slack_alert(
     ua_type: str,
     alert: dict,
 ):
-    try:
-        dt_utc = datetime.strptime(event_time, "%Y-%m-%dT%H:%M:%SZ")
-        event_time_kst = (dt_utc + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        event_time_kst = event_time
+    event_time_kst = to_kst(event_time)
 
-    body = (
-        f"*액세스 키 ID:* {access_key_id}\n"
-        f"*이벤트명:* {event_name} ({event_source})\n"
-        f"*발생 시각:* {event_time_kst} (KST)\n"
-        f"*출발지 IP:* {source_ip} ({country_code})\n"
-    )
+    fields = [
+        ("액세스 키 ID", access_key_id),
+        ("이벤트명", f"{event_name} ({event_source})"),
+        ("발생 시각", f"{event_time_kst} (KST)"),
+        ("출발지 IP", f"{source_ip} ({country_code})"),
+    ]
     if aws_region:
-        body += f"*리전:* {aws_region}\n"
+        fields.append(("리전", aws_region))
     if ua_type:
-        body += f"*UserAgent 타입:* {ua_type}\n"
-    body += f"*상세:* {alert['detail']}"
+        fields.append(("UserAgent 타입", ua_type))
+    fields.append(("상세", alert["detail"]))
+
+    title = f"[{alert['scenario']}] {alert['title']}"
+    send_alert(title, fields)
+
+
+def send_scenario3_alert(
+    access_key_id: str,
+    event_time: str,
+    error_count: int,
+    recent_apis: list,
+):
+    event_time_kst = to_kst(event_time)
+    recent_apis_str = "\n".join([f" - {api}" for api in recent_apis]) if recent_apis else "없음"
+
+    fields = [
+        ("액세스 키 ID", access_key_id),
+        ("발생 시각", f"{event_time_kst} (KST)"),
+        ("상세", f"{ERROR_WINDOW_MIN}분 내 AccessDenied {error_count}회 발생"),
+        ("최근 호출 API", recent_apis_str),
+    ]
+
+    title = "[시나리오 3] 짧은 시간 내 다수 AccessDenied 발생"
+    send_alert(title, fields)
+
+
+def send_alert(title: str, fields: list):
+    if NOTIFICATION_PROVIDER == "teams":
+        _post_teams(title, fields)
+    else:
+        _post_slack(title, fields)
+
+
+def _post_slack(title: str, fields: list):
+    body = "\n".join(f"*{label}:* {value}" for label, value in fields)
 
     payload = {
         "channel": SLACK_CHANNEL_ID,
-        "text": f"*:warning: [{alert['scenario']}] {alert['title']}*",
+        "text": f"*:warning: {title}*",
         "attachments": [
             {
                 "color": "#FFD700",
@@ -326,66 +376,54 @@ def send_slack_alert(
             }
         ]
     }
-    _post_slack(payload)
 
-
-def send_slack_alert_scenario3(
-    access_key_id: str,
-    event_time: str,
-    error_count: int,
-    recent_apis: list,
-):
-    try:
-        dt_utc = datetime.strptime(event_time, "%Y-%m-%dT%H:%M:%SZ")
-        event_time_kst = (dt_utc + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        event_time_kst = event_time
-
-    recent_apis_str = "\n".join([f" - {api}" for api in recent_apis]) if recent_apis else "없음"
-
-    payload = {
-        "channel": SLACK_CHANNEL_ID,
-        "text": "*:warning: [시나리오 3] 짧은 시간 내 다수 AccessDenied 발생*",
-        "attachments": [
-            {
-                "color": "#FFD700",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"*액세스 키 ID:* {access_key_id}\n"
-                                f"*발생 시각:* {event_time_kst} (KST)\n"
-                                f"*상세:* {ERROR_WINDOW_MIN}분 내 AccessDenied {error_count}회 발생\n"
-                                f"*최근 호출 API:*\n{recent_apis_str}"
-                            )
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-    _post_slack(payload)
-
-
-def _post_slack(payload: dict):
-    data = json.dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
+    _post_json(
         url="https://slack.com/api/chat.postMessage",
-        data=data,
+        payload=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+            "Authorization": f"Bearer {NOTIFICATION_CREDENTIAL}",
         },
-        method="POST",
     )
+
+
+def _post_teams(title: str, fields: list):
+    # Power Automate "Teams 웹훅 요청을 수신하는 경우" 워크플로 및
+    # 레거시 Incoming Webhook 커넥터 양쪽에서 그대로 사용 가능한 MessageCard 형식.
+    body = "\n\n".join(f"**{label}:** {value}" for label, value in fields)
+
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "summary": title,
+        "themeColor": "FFD700",
+        "title": f"⚠️ {title}",
+        "text": body,
+    }
+
+    _post_json(
+        url=NOTIFICATION_CREDENTIAL,
+        payload=payload,
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def _post_json(url: str, payload: dict, headers: dict):
+    data = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
 
     try:
         with urllib.request.urlopen(req, timeout=5) as res:
-            body = json.loads(res.read().decode("utf-8"))
-            if not body.get("ok"):
-                logger.error(f"Slack 전송 실패: {body.get('error')}")
+            status = res.getcode()
+            raw = res.read().decode("utf-8")
+
+            if NOTIFICATION_PROVIDER == "teams":
+                if status >= 300:
+                    logger.error(f"Teams 전송 실패 (status={status}): {raw}")
+            else:
+                body = json.loads(raw) if raw else {}
+                if not body.get("ok"):
+                    logger.error(f"Slack 전송 실패: {body.get('error')}")
     except urllib.error.URLError as e:
-        logger.error(f"Slack 요청 실패: {e}")
+        logger.error(f"알림 전송 요청 실패: {e}")
