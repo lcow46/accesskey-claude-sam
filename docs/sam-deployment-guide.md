@@ -245,7 +245,7 @@ Log Archive 계정에서, 위에서 확인한 역할 ARN에 대해 버킷 정책
   "Sid": "AllowAuditAccountRefTableProcessorRead",
   "Effect": "Allow",
   "Principal": {
-    "AWS": "arn:aws:iam::<Audit계정ID>:role:<위에서 확인한 역할 이름>"
+    "AWS": "arn:aws:iam::<Audit계정ID>:role/<위에서 확인한 역할 이름>"
   },
   "Action": "s3:GetObject",
   "Resource": "arn:aws:s3:::<중앙버킷이름>/*"
