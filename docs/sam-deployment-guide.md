@@ -50,25 +50,38 @@ aws configure
 IAM(역할 생성), S3(SAM 배포용 버킷 및 데모 버킷), CloudTrail(데모 모드 사용 시), EventBridge,
 Secrets Manager(읽기), CloudWatch Logs.
 
-### 1-2. Docker (권장, 로컬 테스트 및 크로스 플랫폼 빌드용)
+### 1-2. Docker 불필요 — 빌드 방식 안내
 
-`sam local invoke`로 로컬 테스트를 하거나, 배포 환경의 Python 버전이 Lambda 런타임과 다를 때
-`sam build --use-container`를 쓰려면 Docker가 필요합니다. ([Docker Desktop](https://www.docker.com/products/docker-desktop/))
+이 프로젝트는 **Docker를 전혀 사용하지 않습니다.** 사내 정책 등으로 Docker를 쓸 수 없는
+환경을 위해, `template.yaml`의 세 Lambda 함수 모두 SAM의 커스텀 빌드 방식
+(`Metadata.BuildMethod: makefile`)으로 구성되어 있고, 각 함수 소스 폴더(`src/*/Makefile`)에
+빌드 스크립트가 들어있습니다.
 
-### 1-3. 배포 머신의 Python 버전 확인 (중요)
+일반적으로 `sam build`는 **로컬에 설치된 Python 인터프리터**로 의존성을 설치하기 때문에, 로컬
+Python 버전이 Lambda 런타임(`python3.14`)과 다르면 `Binary validation failed ...` 오류가
+나거나, 이를 피하려면 `sam build --use-container`(Docker 필요)를 써야 하는 것이 SAM의 기본
+동작입니다. 이 프로젝트는 그 대신 각 함수의 Makefile 안에서
+`pip install --platform manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all:`
+같은 **pip의 크로스 플랫폼 다운로드 옵션**을 직접 사용해, 로컬 Python 버전이 무엇이든 상관없이
+Lambda 런타임(Linux x86_64, Python 3.14)에 맞는 wheel을 PyPI에서 바로 받아옵니다. 그 결과
+`make`와 `pip`(그리고 PyPI 접속 가능한 네트워크)만 있으면 되고, Docker도, 정확한 버전의 로컬
+Python도 필요하지 않습니다.
 
-`sam build`는 기본적으로 **로컬에 설치된 Python 인터프리터**로 의존성을 설치합니다. 이 템플릿의
-Lambda 런타임은 `python3.14`이므로, 로컬 머신에도 Python 3.14(또는 최소 동일 마이너 버전대)가
-설치되어 있어야 `sam build`가 그대로 동작합니다.
+- macOS/Linux에는 보통 `make`가 기본 설치되어 있습니다. (`make --version`으로 확인)
+- 사내 프록시/미러 때문에 `pypi.org`에 직접 접속할 수 없다면, `pip.conf`(또는 `PIP_INDEX_URL`
+  환경변수)로 사내 PyPI 미러를 가리키도록 설정하세요. 사내 미러에도 `geoip2`, `maxminddb`,
+  `requests`의 `manylinux2014_x86_64` / `cp314` wheel이 미러링되어 있어야 이 빌드 방식이
+  그대로 동작합니다.
+- 다른 아키텍처(arm64)로 배포하려면 Makefile의 `PLATFORM` 값을 `manylinux2014_aarch64`로,
+  `template.yaml`의 `Globals.Function.Architectures`를 `[arm64]`로 함께 바꿔야 합니다.
 
-```bash
-python3 --version
-```
+### 1-3. Lambda 런타임 버전이 지원되지 않는 경우
 
-- Python 3.14가 없다면 아래 중 하나를 선택하세요.
-  - `pyenv install 3.14.x` 등으로 로컬에 Python 3.14를 설치
-  - Docker가 있다면 `sam build --use-container` 사용 (컨테이너 안의 Lambda 런타임 이미지로 빌드하므로 로컬 Python 버전과 무관)
-  - 아직 사용 중인 리전/계정에서 `python3.14` Lambda 런타임이 제공되지 않는다면, `template.yaml`의 `Globals.Function.Runtime`을 `python3.13`으로 낮추세요.
+배포하려는 리전/계정에서 아직 `python3.14` Lambda 런타임을 지원하지 않는다면, `template.yaml`의
+`Globals.Function.Runtime`을 `python3.13`으로 낮추고, `src/ref_table_processor/Makefile`과
+`src/geoip_layer_builder/Makefile`의 `PY_VERSION`/`PY_ABI` 값도 `3.13`/`cp313`으로 함께
+맞춰주세요. (Docker를 안 쓰는 이 빌드 방식에서는 코드의 로컬 Python 버전이 아니라, Makefile에
+적힌 `PY_VERSION`/`PY_ABI` 값이 실제로 다운로드되는 wheel의 대상 버전을 결정합니다.)
 
 ### 1-4. 알림 채널 준비 (Slack 또는 Teams)
 
@@ -91,16 +104,22 @@ accesskey-claude-sam/
 ├── src/
 │   ├── ref_table_processor/
 │   │   ├── app.py
-│   │   └── requirements.txt          # geoip2, maxminddb
+│   │   ├── requirements.txt          # geoip2, maxminddb
+│   │   └── Makefile                  # Docker 없이 빌드하기 위한 커스텀 빌드 스크립트
 │   ├── suspicious_detector/
-│   │   └── app.py                    # 표준 라이브러리 + boto3만 사용
+│   │   ├── app.py                    # 표준 라이브러리 + boto3만 사용
+│   │   └── Makefile                  # 의존성 없음 — 소스 복사만 수행
 │   └── geoip_layer_builder/
 │       ├── app.py
-│       └── requirements.txt          # requests
-├── events/                           # sam local invoke용 샘플 이벤트
+│       ├── requirements.txt          # requests
+│       └── Makefile
+├── events/                           # sam local invoke 대체 테스트용 샘플 이벤트
 └── docs/
     ├── architecture.md
-    └── sam-deployment-guide.md       # 이 문서
+    ├── sam-deployment-guide.md       # 이 문서
+    └── notifications/
+        ├── slack.md
+        └── teams.md
 ```
 
 ## 3. 배포 전 준비: Secrets Manager 시크릿 생성
@@ -126,20 +145,24 @@ aws secretsmanager create-secret \
 
 ## 4. 빌드
 
-프로젝트 루트(`template.yaml`이 있는 위치)에서 실행합니다.
+프로젝트 루트(`template.yaml`이 있는 위치)에서 실행합니다. Docker는 필요하지 않습니다.
 
 ```bash
 sam build
 ```
 
-로컬 Python 버전이 맞지 않는다는 오류가 나면 컨테이너 빌드를 사용하세요.
+`template.yaml`에 이미 각 함수마다 `Metadata: BuildMethod: makefile`이 지정되어 있으므로,
+`sam build`는 자동으로 `src/*/Makefile`을 실행해 의존성을 내려받습니다. (1-2절 참고) 출력에
+`Running CustomMakeBuilder:MakeBuild`가 보이면 이 방식으로 빌드되고 있는 것입니다.
+
+빌드가 성공하면 `.aws-sam/build/`에 각 함수의 배포 패키지가 생성됩니다. `ref_table_processor`,
+`geoip_layer_builder` 아래에 `geoip2`, `maxminddb`, `requests` 등 `requirements.txt`의
+의존성이 (Linux x86_64용으로) 함께 패키징된 것을 확인할 수 있습니다.
 
 ```bash
-sam build --use-container
+file .aws-sam/build/RefTableProcessorFunction/maxminddb/*.so
+# ELF 64-bit LSB shared object, x86-64 ... 로 나오면 정상 (macOS/Windows에서 빌드해도 Linux용 바이너리)
 ```
-
-빌드가 성공하면 `.aws-sam/build/`에 각 함수의 배포 패키지가 생성됩니다. (`geoip2`,
-`maxminddb`, `requests` 등 `requirements.txt`의 의존성이 함께 패키징된 것을 확인할 수 있습니다.)
 
 ## 5. 배포
 
@@ -320,26 +343,73 @@ sam logs -n ref-suspicious-detector-<Stage값> --stack-name <스택이름> --tai
 [docs/notifications/slack.md](notifications/slack.md) /
 [docs/notifications/teams.md](notifications/teams.md)의 "동작 확인" 절을 참고하세요.
 
-## 9. 로컬 테스트 (`sam local invoke`)
+## 9. 로컬 테스트 (Docker 없이)
 
-Docker가 설치되어 있어야 합니다. `events/` 디렉터리에 샘플 이벤트를 준비해두었습니다.
+`sam local invoke`/`sam local start-lambda`는 Lambda 실행 환경을 로컬 컨테이너로 재현하기
+때문에 Docker가 반드시 필요합니다. 이 환경에서는 Docker를 쓸 수 없으므로 아래 두 가지
+대안으로 테스트합니다.
+
+### 9-1. 배포된 함수에 직접 이벤트를 보내서 테스트 (권장)
+
+가장 확실한 방법은 5단계까지 배포한 뒤, `events/` 디렉터리의 샘플 이벤트를 **실제 배포된
+함수**에 `aws lambda invoke`로 직접 보내보는 것입니다. Lambda 실행 환경 자체(Linux, 정확한
+런타임 버전, 실제 IAM 권한)에서 돌아가므로 오히려 `sam local invoke`보다 신뢰도가 높습니다.
 
 ```bash
-# ref-table-processor: 실제로 지정한 버킷/키의 객체를 S3에서 읽어오므로,
-# events/s3-put-event.json의 bucket/key 값을 실제 존재하는 파일로 바꿔서 사용하세요.
-sam local invoke RefTableProcessorFunction --event events/s3-put-event.json
+# ref-suspicious-detector: DynamoDB Streams INSERT 이벤트를 흉내낸 샘플로 테스트
+aws lambda invoke \
+  --function-name ref-suspicious-detector-<Stage값> \
+  --cli-binary-format raw-in-base64-out \
+  --payload file://events/dynamodb-stream-aws-api-insert.json \
+  /tmp/detector-output.json
+cat /tmp/detector-output.json
 ```
 
 ```bash
-# ref-suspicious-detector: DynamoDB Streams INSERT 이벤트를 흉내낸 샘플입니다.
-sam local invoke RefSuspiciousDetectorFunction --event events/dynamodb-stream-aws-api-insert.json
-sam local invoke RefSuspiciousDetectorFunction --event events/dynamodb-stream-error-event-insert.json
+# ref-table-processor: events/s3-put-event.json의 bucket/key 값을
+# 실제 존재하는 CloudTrail 로그 객체로 바꾼 뒤 테스트
+aws lambda invoke \
+  --function-name ref-table-processor-<Stage값> \
+  --cli-binary-format raw-in-base64-out \
+  --payload file://events/s3-put-event.json \
+  /tmp/processor-output.json
+cat /tmp/processor-output.json
 ```
 
-> `sam local invoke`는 Lambda **실행 환경만** 로컬 컨테이너로 재현합니다. 함수 코드 안의
-> `boto3` 호출(DynamoDB 조회, Secrets Manager 조회, S3 조회 등)은 실제로 배포된 AWS 리소스로
-> 나갑니다. 따라서 로컬 테스트를 하려면 먼저 5단계까지 배포가 완료되어 있어야 하고, 로컬
-> 머신에 해당 리소스에 접근 가능한 AWS 자격증명이 설정되어 있어야 합니다.
+테스트 후에는 CloudWatch Logs(8-3절)로 실제 동작을 확인하세요.
+
+### 9-2. 순수 로직만 빠르게 확인 (배포 전, 로컬 venv)
+
+DynamoDB/Secrets Manager 호출 이전의 순수 파싱/판단 로직만 빠르게 확인하고 싶다면, 로컬
+가상환경에 의존성을 설치해 핸들러를 직접 import해서 호출할 수 있습니다. 이때는 로컬 머신의
+OS/Python 버전 그대로 설치해도 무방합니다 (배포용 빌드가 아니라 로직 확인용이므로 1-2절의
+Linux 타깃 제약과 무관합니다).
+
+```bash
+python3 -m venv .venv-test
+source .venv-test/bin/activate
+pip install -r src/ref_table_processor/requirements.txt boto3
+
+python3 - <<'EOF'
+import sys, json
+sys.path.insert(0, "src/ref_table_processor")
+import os
+os.environ.update({
+    "ERROR_EVENT_TABLE": "ref_error_event-dev",
+    "IP_COUNTRY_TABLE": "ref_ip_country-dev",
+    "AWS_API_TABLE": "ref_aws_api-dev",
+    "REGION_TABLE": "ref_region-dev",
+    "USER_AGENT_TABLE": "ref_user_agent-dev",
+})
+import app
+print(app.classify_user_agent("aws-cli/2.15.0"))  # 예: 순수 함수 단위 테스트
+EOF
+deactivate
+```
+
+`app.lambda_handler(event, None)`처럼 핸들러를 직접 호출할 수도 있지만, 그 경우 `boto3`
+호출은 실제 AWS로 나가므로(로컬 자격증명이 설정되어 있어야 함) 9-1절과 사실상 같은 효과이며
+차이는 Lambda 실행 환경을 흉내내지 않는다는 점뿐입니다.
 
 ## 10. 스택 삭제
 
@@ -370,8 +440,9 @@ sam delete
 
 | 증상 | 원인 / 해결 |
 |---|---|
-| `sam build` 시 `Binary validation failed for python ... runtime: python3.14` | 로컬 Python 버전이 3.14가 아님. `sam build --use-container` 사용하거나 로컬에 Python 3.14 설치, 또는 template.yaml의 Runtime을 낮추기 |
-| 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. `template.yaml`의 `Globals.Function.Runtime`을 `python3.13`으로 낮춰서 재배포 |
+| `sam build` 시 `make: pip: command not found` 또는 `python3: command not found` | 빌드 머신에 `make` 또는 `python3`/`pip`이 없음. macOS는 Xcode Command Line Tools(`xcode-select --install`)로 `make`를, Linux는 배포판 패키지 매니저로 `python3`/`python3-pip`을 설치 |
+| `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. 1-2절의 사내 PyPI 미러 설정(`PIP_INDEX_URL` 등)을 확인하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
+| 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. 1-3절대로 `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 트리거되지 않음 (기존 버킷 모드) | 6-2절의 두 수동 단계(버킷 정책, 알림 등록)가 Log Archive 계정에서 실제로 적용됐는지 확인 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
@@ -401,6 +472,11 @@ sam delete
    (스테이지별로 다른 이름을 써서 dev/prod 동시 배포 시 충돌 방지)
 7. `geoip-layer-builder.py`: `publish_layer()`의 `CompatibleRuntimes=["python3.12"]` →
    `["python3.13", "python3.14"]`로 갱신 (함수 런타임과 불일치 시 Layer 연결 실패 가능성 방지)
+8. Docker를 쓸 수 없는 환경을 위해, `ref-table-processor`/`geoip-layer-builder`/
+   `ref-suspicious-detector` 세 함수 모두 `Metadata: BuildMethod: makefile`로 전환하고
+   `src/*/Makefile`을 추가했습니다. 각 Makefile은 `pip install --platform
+   manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all:`로 로컬
+   Python 버전과 무관하게 Lambda 런타임에 맞는 의존성을 내려받습니다. (1-2절 참고)
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**
 

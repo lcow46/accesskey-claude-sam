@@ -228,6 +228,8 @@ Resources:
   # ---------------------------------------------------------------------
   RefTableProcessorFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
     Properties:
       FunctionName: !Sub "ref-table-processor-${Stage}"
       Description: CloudTrail 로그 파일을 파싱하여 Reference Table 5종에 적재
@@ -353,6 +355,8 @@ Resources:
   # ---------------------------------------------------------------------
   RefSuspiciousDetectorFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
     Properties:
       FunctionName: !Sub "ref-suspicious-detector-${Stage}"
       Description: Reference Table Streams를 기반으로 이상탐지 시나리오를 평가하고 Slack/Teams 알림 발송
@@ -416,6 +420,8 @@ Resources:
   # ---------------------------------------------------------------------
   GeoIpLayerBuilderFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
     Properties:
       FunctionName: !Sub "geoip-layer-builder-${Stage}"
       Description: MaxMind GeoLite2-City.mmdb 갱신 여부를 확인하여 Lambda Layer로 재발행
