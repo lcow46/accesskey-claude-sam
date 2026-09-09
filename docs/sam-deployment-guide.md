@@ -235,7 +235,14 @@ sam build && sam deploy
 assume해서 S3에 접근하게 합니다. 역할을 assume한 시점부터는 임시 자격증명이 Log Archive
 계정 소속이 되므로 같은 계정 접근과 동일하게 처리되고, 버킷 정책 수정이 필요 없습니다.
 
-**(1) Audit 계정에서: Lambda 실행 역할 ARN 확인**
+**아래 작업은 계정이 서로 다르므로, 어느 계정에서 실행하는지 각 명령마다 명시했습니다.
+반드시 표시된 계정으로 전환한 뒤 실행하세요.**
+
+#### Audit 계정에서 (1) — 필요한 값 확인
+
+이후 단계에서 쓸 두 가지 값을 미리 확인해둡니다.
+
+Lambda 실행 역할 이름:
 
 ```bash
 aws cloudformation describe-stack-resource \
@@ -244,9 +251,21 @@ aws cloudformation describe-stack-resource \
   --query "StackResourceDetail.PhysicalResourceId" --output text
 ```
 
-**(2) Log Archive 계정에서: 크로스 계정 역할 생성**
+`RefTableProcessorFunction`의 ARN:
 
-이 Audit 계정 역할만 assume할 수 있는 새 역할을 만듭니다.
+```bash
+aws cloudformation describe-stacks --stack-name <스택이름> \
+  --query "Stacks[0].Outputs[?OutputKey=='RefTableProcessorFunctionArn'].OutputValue" --output text
+```
+
+#### Log Archive 계정에서 — 크로스 계정 역할 생성 + 이벤트 알림 등록
+
+**역할은 반드시 이 계정(버킷을 소유한 계정) 안에 만들어야 합니다.** Audit 계정에 만들면
+동작하지 않습니다 — Audit 계정에 만든 역할은 Log Archive 계정 소속이 아니므로, 그 역할을
+assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 정책이 없으면 거부됩니다.
+
+Audit 계정 역할만 assume할 수 있는 새 역할을 만듭니다 (Principal 값은 위에서 확인한 Lambda
+실행 역할 이름으로 채우세요).
 
 ```bash
 cat > trust-policy.json <<'EOF'
@@ -291,37 +310,16 @@ aws iam put-role-policy \
   --policy-document file://read-policy.json
 ```
 
-생성된 역할의 ARN을 확인해둡니다.
+생성된 역할의 ARN을 확인해둡니다 (Audit 계정 재배포에 필요).
 
 ```bash
 aws iam get-role --role-name accesskey-detector-cloudtrail-reader --query "Role.Arn" --output text
 ```
 
-**(3) Audit 계정에서: 스택 재배포하며 역할 ARN 전달**
-
-`sam deploy`(또는 `--guided`) 실행 시 `CrossAccountS3RoleArn` 파라미터에 위에서 만든 역할
-ARN을 지정합니다.
-
-```bash
-sam deploy --parameter-overrides CrossAccountS3RoleArn=arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader
-```
-
-이렇게 배포하면 `ref-table-processor`가 이 역할을 자동으로 assume해서 S3를 읽습니다
-(`src/ref_table_processor/app.py`의 `get_s3_client()` 참고).
-
-**(4) Log Archive 계정에서: S3 이벤트 알림 등록**
-
-읽기 권한과는 별개로, Lambda를 실제로 트리거하려면 버킷에 이벤트 알림을 등록해야 합니다.
-
-Audit 계정에서 배포된 `RefTableProcessorFunction`의 ARN을 확인한 뒤,
-
-```bash
-aws cloudformation describe-stacks --stack-name <스택이름> \
-  --query "Stacks[0].Outputs[?OutputKey=='RefTableProcessorFunctionArn'].OutputValue" --output text
-```
-
-Log Archive 계정에서 아래처럼 알림을 등록합니다. (기존 NotificationConfiguration이 있다면
-`get-bucket-notification-configuration`으로 먼저 받아서 병합한 뒤 put 하세요.)
+이어서 같은 계정에서 S3 이벤트 알림을 등록합니다 (읽기 권한과는 별개로 반드시 필요한
+작업입니다). `<위에서 확인한 RefTableProcessorFunctionArn>`은 Audit 계정에서 (1)에 확인해둔
+값입니다. 기존 NotificationConfiguration이 있다면 `get-bucket-notification-configuration`으로
+먼저 받아서 병합한 뒤 put 하세요.
 
 ```bash
 aws s3api put-bucket-notification-configuration \
@@ -342,6 +340,18 @@ aws s3api put-bucket-notification-configuration \
     ]
   }'
 ```
+
+#### Audit 계정에서 (2) — 크로스 계정 역할 ARN으로 재배포
+
+`sam deploy`(또는 `--guided`) 실행 시 `CrossAccountS3RoleArn` 파라미터에 Log Archive
+계정에서 만든 역할의 ARN을 지정합니다.
+
+```bash
+sam deploy --parameter-overrides CrossAccountS3RoleArn=arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader
+```
+
+이렇게 배포하면 `ref-table-processor`가 이 역할을 자동으로 assume해서 S3를 읽습니다
+(`src/ref_table_processor/app.py`의 `get_s3_client()` 참고).
 
 ## 7. 배포 후 필수 수동 단계: GeoIP Layer 최초 생성
 
