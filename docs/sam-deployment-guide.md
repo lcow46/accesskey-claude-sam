@@ -190,6 +190,7 @@ sam deploy --guided
 | Parameter GeoIpUpdateSchedule | GeoIP DB 갱신 주기 (기본 `rate(7 days)`) |
 | Parameter DeployDemoCloudTrail | **처음 테스트해보는 것이라면 `true`** 권장 (아래 6절 참고) |
 | Parameter ExistingCloudTrailBucketName / AccountId | `DeployDemoCloudTrail=false`일 때만 입력 |
+| Parameter CrossAccountS3RoleArn | (선택) 버킷 정책 편집이 막혀있어 6-2-B 방식을 쓸 때만 입력. 처음 배포할 때는 비워두고, 6-2-B에서 역할을 만든 뒤 재배포 시 지정해도 됨 |
 | Confirm changes before deploy | `Y` 권장 (변경 내용을 보고 승인) |
 | Allow SAM CLI IAM role creation | `Y` (Lambda 실행 역할 등을 생성해야 함) |
 | Disable rollback | `N` |
@@ -224,9 +225,13 @@ sam build && sam deploy
 
 이 모드는 버킷이 **다른 AWS 계정**에 있으므로, CloudFormation 한 스택만으로는 양쪽을 다 설정할 수
 없습니다. 이 스택은 "Lambda가 그 버킷으로부터의 호출을 허용한다"는 쪽(Lambda 리소스 정책)만
-자동으로 만들고, 아래 두 가지는 **Log Archive 계정에서 별도로** 실행해야 합니다.
+자동으로 만들고, 아래 작업은 **Log Archive 계정에서 별도로** 실행해야 합니다.
 
-**(1) Log Archive 계정에서: 버킷 정책에 Audit 계정의 Lambda 실행 역할 읽기 권한 추가**
+읽기 권한(S3 GetObject)을 부여하는 방법은 두 가지이며, 이 중 하나만 선택합니다. **Control
+Tower가 CloudTrail 로그 버킷의 정책 변경을 SCP로 막아두는 경우가 많으므로, 먼저 6-2-B(크로스
+계정 역할) 방식을 시도해보는 것을 권장합니다.**
+
+#### 6-2-A. 버킷 정책 방식 (버킷 정책 편집이 허용되는 경우)
 
 먼저 이 스택의 `RefTableProcessorFunction` 실행 역할 ARN을 Audit 계정에서 확인합니다.
 
@@ -238,7 +243,8 @@ aws cloudformation describe-stack-resource \
 ```
 
 Log Archive 계정에서, 위에서 확인한 역할 ARN에 대해 버킷 정책에 아래와 같은 statement를
-추가합니다 (기존 정책에 병합하세요).
+추가합니다 (기존 정책에 병합하세요). **`role` 다음은 슬래시(`/`)입니다 — 콜론(`:`)으로 쓰면
+"Invalid ARN Resource" 오류가 납니다.**
 
 ```json
 {
@@ -252,7 +258,101 @@ Log Archive 계정에서, 위에서 확인한 역할 ARN에 대해 버킷 정책
 }
 ```
 
-**(2) Log Archive 계정에서: S3 이벤트 알림 등록**
+Control Tower 환경에서는 이 `PutBucketPolicy` 호출 자체가 SCP의 명시적 거부(explicit
+deny)로 막혀있는 경우가 흔합니다. 이 경우 IAM 권한(관리자 권한 포함)으로는 우회할 수 없으며,
+아래 6-2-B 방식으로 넘어가세요.
+
+#### 6-2-B. 크로스 계정 역할(Assume Role) 방식 (버킷 정책 편집이 막혀있는 경우, 권장)
+
+이 방식은 **Log Archive 계정의 버킷 정책을 전혀 건드리지 않습니다.** 대신 Log Archive
+계정에 IAM 역할을 하나 새로 만들고, `ref-table-processor`가 그 역할을 assume(위임)해서 S3에
+접근합니다. 역할을 assume하고 나면 임시 자격증명은 Log Archive 계정 소속이 되므로, 그 시점부터는
+"같은 계정 접근"과 동일하게 취급되어 버킷 정책 수정이 필요 없습니다. `iam:CreateRole` 등
+IAM 역할 생성은 CloudTrail 버킷을 보호하는 SCP와는 별개의 액션이라 대부분 막혀있지 않습니다.
+
+**(1) Log Archive 계정에서: 크로스 계정 역할 생성**
+
+먼저 Audit 계정에서 `RefTableProcessorFunction` 실행 역할 ARN을 확인합니다 (6-2-A의 (1)과 동일).
+
+```bash
+aws cloudformation describe-stack-resource \
+  --stack-name <스택이름> \
+  --logical-resource-id RefTableProcessorFunctionRole \
+  --query "StackResourceDetail.PhysicalResourceId" --output text
+```
+
+Log Archive 계정에서, 이 Audit 계정 역할만 assume할 수 있는 새 역할을 만듭니다.
+
+```bash
+cat > trust-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<Audit계정ID>:role/<위에서 확인한 역할 이름>"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name accesskey-detector-cloudtrail-reader \
+  --assume-role-policy-document file://trust-policy.json
+```
+
+그 역할에 대상 버킷의 읽기 권한만 부여합니다.
+
+```bash
+cat > read-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<중앙버킷이름>/*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name accesskey-detector-cloudtrail-reader \
+  --policy-name read-cloudtrail-logs \
+  --policy-document file://read-policy.json
+```
+
+생성된 역할의 ARN(`arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader`)을
+확인해둡니다.
+
+```bash
+aws iam get-role --role-name accesskey-detector-cloudtrail-reader --query "Role.Arn" --output text
+```
+
+**(2) Audit 계정에서: 스택 재배포하며 역할 ARN 전달**
+
+`sam deploy`(또는 `--guided`) 실행 시 `CrossAccountS3RoleArn` 파라미터에 위에서 만든 역할
+ARN을 지정합니다.
+
+```bash
+sam deploy --parameter-overrides CrossAccountS3RoleArn=arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader
+```
+
+이렇게 배포하면 `ref-table-processor`가 이 역할을 자동으로 assume해서 S3를 읽습니다
+(`src/ref_table_processor/app.py`의 `get_s3_client()` 참고). 이때는 6-2-A의 `S3ReadPolicy`
+(버킷 정책 기반 접근)는 템플릿에서 자동으로 빠지므로 별도 조치가 필요 없습니다.
+
+#### 6-2-C. (두 방식 공통, 필수) Log Archive 계정에서: S3 이벤트 알림 등록
+
+6-2-A/B 중 어느 쪽으로 읽기 권한을 해결했든, **Lambda를 실제로 트리거하려면 버킷에 이벤트
+알림을 등록하는 이 단계가 별도로 필요합니다.** 이 작업(`s3:PutBucketNotification`)은
+`s3:PutBucketPolicy`와는 다른 액션이지만, 같은 SCP 가드레일이 CloudTrail 버킷에 대한 설정
+변경을 폭넓게 막아두는 경우 이 단계도 함께 막혀있을 수 있습니다. 먼저 시도해보고, 막힌다면
+조직의 Control Tower/보안 담당자에게 이 등록 자체를 대신 실행해달라고 요청해야 합니다.
 
 Audit 계정에서 배포된 `RefTableProcessorFunction`의 ARN을 확인한 뒤,
 
@@ -444,7 +544,9 @@ sam delete
 | `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. 1-2절의 사내 PyPI 미러 설정(`PIP_INDEX_URL` 등)을 확인하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
 | 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. 1-3절대로 `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
-| `ref-table-processor`가 트리거되지 않음 (기존 버킷 모드) | 6-2절의 두 수동 단계(버킷 정책, 알림 등록)가 Log Archive 계정에서 실제로 적용됐는지 확인 |
+| `ref-table-processor`가 트리거되지 않음 (기존 버킷 모드) | 6-2절의 수동 단계(읽기 권한 + 6-2-C 알림 등록)가 Log Archive 계정에서 실제로 적용됐는지 확인 |
+| 버킷 정책 저장 시 `explicit deny in a service control policy` 오류 | Control Tower가 CloudTrail 버킷 정책 변경을 SCP로 막고 있는 것. IAM 권한으로는 우회 불가 — 6-2-B(크로스 계정 역할) 방식으로 전환 |
+| `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 (특히 `role/`을 `role:`로 잘못 쓰지 않았는지) |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
 | 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
 | `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
@@ -477,6 +579,10 @@ sam delete
    `src/*/Makefile`을 추가했습니다. 각 Makefile은 `pip install --platform
    manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all:`로 로컬
    Python 버전과 무관하게 Lambda 런타임에 맞는 의존성을 내려받습니다. (1-2절 참고)
+9. `ref-table-processor.py`: Control Tower SCP 등으로 Log Archive 계정의 CloudTrail 버킷
+   정책을 편집할 수 없는 환경을 위해, `CROSS_ACCOUNT_S3_ROLE_ARN` 환경변수가 설정되어 있으면
+   해당 역할을 `sts:AssumeRole`로 위임받아 S3에 접근하는 `get_s3_client()`를 추가했습니다.
+   설정하지 않으면 기존과 동일하게 자기 자신의 실행 역할로 S3에 접근합니다. (6-2-B절 참고)
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**
 

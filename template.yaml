@@ -81,10 +81,11 @@ Parameters:
 
   ExistingCloudTrailBucketName:
     Type: String
-    Default: ""
+    Default: "changeme-existing-cloudtrail-bucket"
     Description: >
-      DeployDemoCloudTrail=false일 때 사용할, 이미 존재하는 중앙 CloudTrail S3 버킷 이름
-      (Log Archive 계정의 버킷). Organization Trail 환경에서는 크로스 계정 버킷입니다.
+      DeployDemoCloudTrail=false일 때 반드시 실제 값으로 지정해야 하는, 이미 존재하는 중앙
+      CloudTrail S3 버킷 이름(Log Archive 계정의 버킷). Organization Trail 환경에서는
+      크로스 계정 버킷입니다. 기본값은 데모 모드에서는 사용되지 않는 자리표시자입니다.
 
   ExistingCloudTrailBucketAccountId:
     Type: String
@@ -95,9 +96,24 @@ Parameters:
       AWS 계정 ID (S3 → Lambda invoke 권한의 SourceAccount 조건에 사용되어 confused-deputy를
       방지합니다). 기본값 000000000000은 데모 모드에서는 사용되지 않는 자리표시자입니다.
 
+  CrossAccountS3RoleArn:
+    Type: String
+    Default: ""
+    Description: >
+      (선택) 중앙 CloudTrail 버킷을 소유한 계정(Log Archive 등)에 미리 만들어 둔 크로스
+      계정 IAM 역할의 ARN. 지정하면 ref-table-processor가 이 역할을 assume하여 S3 객체를
+      읽으므로, 그 계정의 버킷 정책을 전혀 수정할 필요가 없습니다. Control Tower SCP 등으로
+      버킷 정책 편집이 막혀있는 환경에서 사용하세요. 비워두면 기존 방식(버킷 정책 기반,
+      ExistingCloudTrailBucketName)을 사용합니다. 두 방식 모두, 버킷의 S3 이벤트 알림 등록은
+      별도로 필요합니다 (docs/sam-deployment-guide.md 6절 참고).
+
 Conditions:
   IsDemoMode: !Equals [!Ref DeployDemoCloudTrail, "true"]
   IsNotDemoMode: !Not [!Equals [!Ref DeployDemoCloudTrail, "true"]]
+  HasCrossAccountS3Role: !Not [!Equals [!Ref CrossAccountS3RoleArn, ""]]
+  UseBucketPolicyApproach: !And
+    - !Condition IsNotDemoMode
+    - !Not [!Condition HasCrossAccountS3Role]
 
 # -----------------------------------------------------------------------
 # Globals
@@ -244,6 +260,7 @@ Resources:
           AWS_API_TABLE: !Ref RefAwsApiTable
           REGION_TABLE: !Ref RefRegionTable
           USER_AGENT_TABLE: !Ref RefUserAgentTable
+          CROSS_ACCOUNT_S3_ROLE_ARN: !Ref CrossAccountS3RoleArn
       Policies:
         - DynamoDBWritePolicy:
             TableName: !Ref RefIpCountryTable
@@ -255,11 +272,24 @@ Resources:
             TableName: !Ref RefErrorEventTable
         - DynamoDBWritePolicy:
             TableName: !Ref RefAwsApiTable
-        - S3ReadPolicy:
-            BucketName: !If
-              - IsDemoMode
-              - !Sub "accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
-              - !Ref ExistingCloudTrailBucketName
+        - !If
+          - IsDemoMode
+          - S3ReadPolicy:
+              BucketName: !Sub "accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
+          - !Ref AWS::NoValue
+        - !If
+          - UseBucketPolicyApproach
+          - S3ReadPolicy:
+              BucketName: !Ref ExistingCloudTrailBucketName
+          - !Ref AWS::NoValue
+        - !If
+          - HasCrossAccountS3Role
+          - Statement:
+              - Sid: AssumeCrossAccountS3Role
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Ref CrossAccountS3RoleArn
+          - !Ref AWS::NoValue
 
   # S3(Log Archive 버킷) → Lambda invoke 권한 - 데모 모드 (같은 계정)
   RefTableProcessorInvokePermissionDemo:

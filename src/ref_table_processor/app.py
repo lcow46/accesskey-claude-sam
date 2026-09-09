@@ -8,7 +8,15 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-s3_client = boto3.client("s3")
+# 중앙 CloudTrail 버킷이 다른 계정(Log Archive 등)에 있고, 그 계정의 버킷 정책을
+# 직접 편집할 수 없는 환경(Control Tower SCP로 보호되는 경우 등)을 위한 옵션.
+# 지정하면 이 역할을 assume해서 S3를 읽으므로, 버킷 정책 수정이 전혀 필요 없다.
+CROSS_ACCOUNT_S3_ROLE_ARN = os.environ.get("CROSS_ACCOUNT_S3_ROLE_ARN", "")
+
+_default_s3_client = boto3.client("s3")
+_cross_account_s3_client = None
+_cross_account_s3_client_expiry = None
+
 dynamodb = boto3.resource("dynamodb")
 
 
@@ -41,8 +49,45 @@ def lambda_handler(event, context):
             logger.error(f"파일 처리 실패 - bucket: {bucket}, key: {key}, error: {e}")
 
 
+def get_s3_client():
+    """
+    CROSS_ACCOUNT_S3_ROLE_ARN이 설정되어 있으면 그 역할을 assume해서 발급받은 임시
+    자격증명으로 S3 클라이언트를 만든다 (중앙 버킷을 소유한 계정의 IAM 역할이므로,
+    버킷 정책 수정 없이 같은 계정 접근처럼 동작). 설정되어 있지 않으면 기존과 동일하게
+    이 함수 자신의 실행 역할로 S3에 접근한다 (같은 계정 버킷 또는 버킷 정책으로 이미
+    크로스 계정 접근이 허용된 경우).
+    """
+    if not CROSS_ACCOUNT_S3_ROLE_ARN:
+        return _default_s3_client
+
+    global _cross_account_s3_client, _cross_account_s3_client_expiry
+    now = datetime.now(timezone.utc)
+    needs_refresh = (
+        _cross_account_s3_client is None
+        or _cross_account_s3_client_expiry is None
+        or now >= _cross_account_s3_client_expiry - timedelta(minutes=5)
+    )
+
+    if needs_refresh:
+        sts_client = boto3.client("sts")
+        assumed = sts_client.assume_role(
+            RoleArn=CROSS_ACCOUNT_S3_ROLE_ARN,
+            RoleSessionName="ref-table-processor",
+        )
+        creds = assumed["Credentials"]
+        _cross_account_s3_client = boto3.client(
+            "s3",
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+        )
+        _cross_account_s3_client_expiry = creds["Expiration"]
+
+    return _cross_account_s3_client
+
+
 def process_cloudtrail_file(bucket: str, key: str):
-    response = s3_client.get_object(Bucket=bucket, Key=key)
+    response = get_s3_client().get_object(Bucket=bucket, Key=key)
     compressed = response["Body"].read()
 
     with gzip.GzipFile(fileobj=__import__("io").BytesIO(compressed)) as f:
