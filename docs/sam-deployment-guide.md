@@ -235,28 +235,17 @@ sam build && sam deploy
 assume해서 S3에 접근하게 합니다. 역할을 assume한 시점부터는 임시 자격증명이 Log Archive
 계정 소속이 되므로 같은 계정 접근과 동일하게 처리되고, 버킷 정책 수정이 필요 없습니다.
 
-**아래 작업은 계정이 서로 다르므로, 어느 계정에서 실행하는지 각 명령마다 명시했습니다.
-반드시 표시된 계정으로 전환한 뒤 실행하세요.**
+**아래 작업은 계정이 서로 다르므로, 어느 계정 콘솔에서 진행하는지 각 단계마다 명시했습니다.
+반드시 표시된 계정으로 콘솔 우측 상단에서 전환(스위치 롤/SSO 계정 변경)한 뒤 진행하세요.**
 
 #### Audit 계정에서 (1) — 필요한 값 확인
 
-이후 단계에서 쓸 두 가지 값을 미리 확인해둡니다.
+**Lambda 콘솔** → 함수 목록에서 `ref-table-processor-<Stage값>` 클릭.
 
-Lambda 실행 역할 이름:
-
-```bash
-aws cloudformation describe-stack-resource \
-  --stack-name <스택이름> \
-  --logical-resource-id RefTableProcessorFunctionRole \
-  --query "StackResourceDetail.PhysicalResourceId" --output text
-```
-
-`RefTableProcessorFunction`의 ARN:
-
-```bash
-aws cloudformation describe-stacks --stack-name <스택이름> \
-  --query "Stacks[0].Outputs[?OutputKey=='RefTableProcessorFunctionArn'].OutputValue" --output text
-```
+- 함수 이름 옆 **"ARN 복사"** 버튼으로 함수 ARN을 복사해둡니다. (뒤에서 S3 이벤트 알림 설정에 사용)
+- **Configuration(구성)** 탭 → **Permissions(권한)** → **Execution role(실행 역할)** 섹션에
+  표시된 역할 이름을 클릭하면 IAM 콘솔로 이동합니다. 그 페이지 상단의 **ARN**을 복사해둡니다.
+  (뒤에서 Log Archive 쪽 신뢰 정책에 사용)
 
 #### Log Archive 계정에서 — 크로스 계정 역할 생성 + 이벤트 알림 등록
 
@@ -264,94 +253,94 @@ aws cloudformation describe-stacks --stack-name <스택이름> \
 동작하지 않습니다 — Audit 계정에 만든 역할은 Log Archive 계정 소속이 아니므로, 그 역할을
 assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 정책이 없으면 거부됩니다.
 
-Audit 계정 역할만 assume할 수 있는 새 역할을 만듭니다 (Principal 값은 위에서 확인한 Lambda
-실행 역할 이름으로 채우세요).
+**1) 역할 생성**
 
-```bash
-cat > trust-policy.json <<'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::<Audit계정ID>:role/<위에서 확인한 역할 이름>"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
+**IAM 콘솔** → 왼쪽 메뉴 **Roles(역할)** → **Create role(역할 생성)**
 
-aws iam create-role \
-  --role-name accesskey-detector-cloudtrail-reader \
-  --assume-role-policy-document file://trust-policy.json
-```
+- **Trusted entity type**: **Custom trust policy** 선택
+- 아래 JSON 편집창에 기존 내용을 지우고 아래 내용을 붙여넣습니다. `Principal.AWS` 값은
+  Audit 계정에서 복사해둔 Lambda 실행 역할 ARN으로 바꾸세요.
 
-그 역할에 대상 버킷의 읽기 권한만 부여합니다.
-
-```bash
-cat > read-policy.json <<'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::<중앙버킷이름>/*"
-    }
-  ]
-}
-EOF
-
-aws iam put-role-policy \
-  --role-name accesskey-detector-cloudtrail-reader \
-  --policy-name read-cloudtrail-logs \
-  --policy-document file://read-policy.json
-```
-
-생성된 역할의 ARN을 확인해둡니다 (Audit 계정 재배포에 필요).
-
-```bash
-aws iam get-role --role-name accesskey-detector-cloudtrail-reader --query "Role.Arn" --output text
-```
-
-이어서 같은 계정에서 S3 이벤트 알림을 등록합니다 (읽기 권한과는 별개로 반드시 필요한
-작업입니다). `<위에서 확인한 RefTableProcessorFunctionArn>`은 Audit 계정에서 (1)에 확인해둔
-값입니다. 기존 NotificationConfiguration이 있다면 `get-bucket-notification-configuration`으로
-먼저 받아서 병합한 뒤 put 하세요.
-
-```bash
-aws s3api put-bucket-notification-configuration \
-  --bucket <중앙버킷이름> \
-  --notification-configuration '{
-    "LambdaFunctionConfigurations": [
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
       {
-        "LambdaFunctionArn": "<위에서 확인한 RefTableProcessorFunctionArn>",
-        "Events": ["s3:ObjectCreated:Put"],
-        "Filter": {
-          "Key": {
-            "FilterRules": [
-              { "Name": "suffix", "Value": ".json.gz" }
-            ]
-          }
-        }
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::<Audit계정ID>:role/<Lambda 실행 역할 이름>"
+        },
+        "Action": "sts:AssumeRole"
       }
     ]
-  }'
-```
+  }
+  ```
+
+- **Next** → **Add permissions** 화면은 아무것도 선택하지 않고 그대로 **Next**
+  (권한은 역할 생성 후 인라인 정책으로 따로 추가합니다)
+- **Role name**: `accesskey-detector-cloudtrail-reader` 입력 → **Create role**
+
+**2) 읽기 권한 추가**
+
+방금 만든 역할 페이지로 이동 → **Permissions(권한)** 탭 → **Add permissions** →
+**Create inline policy**
+
+- **JSON** 탭으로 전환 후 아래 내용을 붙여넣습니다. `Resource`의 버킷 이름을 실제 중앙
+  버킷 이름으로 바꾸세요.
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::<중앙버킷이름>/*"
+      }
+    ]
+  }
+  ```
+
+- **Next** → Policy name: `read-cloudtrail-logs` → **Create policy**
+- 역할 페이지 상단의 **ARN**을 복사해둡니다 (Audit 계정 재배포에 필요).
+
+**3) S3 이벤트 알림 등록**
+
+읽기 권한과는 별개로 반드시 필요한 작업입니다.
+
+**S3 콘솔** → 중앙 버킷(예: `aws-controltower-cloudtrail-logs-...`) 클릭 → **Properties(속성)**
+탭 → 아래로 스크롤하여 **Event notifications(이벤트 알림)** → **Create event notification**
+
+- **Event name**: 원하는 이름 (예: `ref-table-processor-trigger`)
+- **Suffix**: `.json.gz` 입력 (Prefix는 비워둠)
+- **Event types**: **All object create events**(또는 `PUT`만 개별 선택 가능하면 `PUT`만) 체크
+- **Destination**: **Lambda function** 선택 → **Enter Lambda function ARN** 옵션 선택
+  (크로스 계정이라 드롭다운에 목록이 안 뜨므로 직접 입력해야 합니다) → Audit 계정에서
+  복사해둔 `RefTableProcessorFunction` ARN 붙여넣기
+- **Save changes**
+
+> 기존에 이미 등록된 이벤트 알림이 있다면 이 알림이 그것들을 덮어쓰지 않고 추가되는지
+> 확인하세요 (콘솔은 기존 알림 목록을 함께 보여줍니다).
 
 #### Audit 계정에서 (2) — 크로스 계정 역할 ARN으로 재배포
 
-`sam deploy`(또는 `--guided`) 실행 시 `CrossAccountS3RoleArn` 파라미터에 Log Archive
-계정에서 만든 역할의 ARN을 지정합니다.
+**CloudFormation 콘솔** → **Stacks(스택)** → 이 스택 선택 → **Update(업데이트)**
 
-```bash
-sam deploy --parameter-overrides CrossAccountS3RoleArn=arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader
-```
+- **Use current template(현재 템플릿 사용)** 선택 → **Next**
+- **Parameters** 화면에서 `CrossAccountS3RoleArn` 값에 Log Archive 계정에서 복사해둔 역할
+  ARN(`arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader`)을
+  붙여넣기 → **Next**
+- Stack options는 그대로 **Next**
+- 검토 화면에서 **"I acknowledge that AWS CloudFormation might create IAM resources"**
+  체크 → **Update stack(스택 업데이트)**
 
 이렇게 배포하면 `ref-table-processor`가 이 역할을 자동으로 assume해서 S3를 읽습니다
 (`src/ref_table_processor/app.py`의 `get_s3_client()` 참고).
+
+> CLI로 재배포하려면 `sam deploy --guided`를 다시 실행해 전체 파라미터를 한 번에 다시
+> 입력하거나, `samconfig.toml`의 `parameter_overrides`에 `CrossAccountS3RoleArn=<위 ARN>`을
+> 직접 추가한 뒤 `sam deploy`를 실행하세요. (이전에 저장된 다른 파라미터가 초기화되지 않도록
+> `sam deploy --parameter-overrides`만 단독으로 넘기지 않도록 주의하세요.)
 
 ## 7. 배포 후 필수 수동 단계: GeoIP Layer 최초 생성
 
