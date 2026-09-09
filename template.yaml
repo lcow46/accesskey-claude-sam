@@ -70,6 +70,14 @@ Parameters:
     Default: rate(7 days)
     Description: geoip-layer-builder를 주기 실행할 EventBridge 스케줄 표현식
 
+  PollSchedule:
+    Type: String
+    Default: rate(5 minutes)
+    Description: >
+      CrossAccountS3RoleArn을 사용하는 폴링 모드에서, ref-table-processor가 중앙 버킷을
+      스캔할 주기. S3 이벤트 알림을 쓰지 않는 환경(Control Tower SCP로 버킷 알림 등록이
+      막힌 경우)을 위한 값입니다. 다른 모드에서는 사용되지 않습니다.
+
   DeployDemoCloudTrail:
     Type: String
     Default: "true"
@@ -235,6 +243,21 @@ Resources:
       StreamSpecification:
         StreamViewType: NEW_IMAGE
 
+  # 폴링 모드(HasCrossAccountS3Role)에서 (계정+리전)별로 마지막까지 처리한 S3 키를
+  # 저장해, 다음 폴링 때 신규 파일만 가져오게 한다. Reference Table과는 무관한
+  # 내부 상태 저장용 테이블이라 Streams/TTL이 필요 없다.
+  RefPollCursorTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "ref_poll_cursor-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: prefix
+          AttributeType: S
+      KeySchema:
+        - AttributeName: prefix
+          KeyType: HASH
+
   # ---------------------------------------------------------------------
   # ref-table-processor : S3(CloudTrail 로그) → Reference Table 적재
   # GeoIP mmdb Lambda Layer는 geoip-layer-builder가 런타임에 동적으로 발행/연결하므로
@@ -261,6 +284,11 @@ Resources:
           REGION_TABLE: !Ref RefRegionTable
           USER_AGENT_TABLE: !Ref RefUserAgentTable
           CROSS_ACCOUNT_S3_ROLE_ARN: !Ref CrossAccountS3RoleArn
+          POLL_CURSOR_TABLE: !Ref RefPollCursorTable
+          POLL_BUCKET_NAME: !If
+            - HasCrossAccountS3Role
+            - !Ref ExistingCloudTrailBucketName
+            - ""
       Policies:
         - DynamoDBWritePolicy:
             TableName: !Ref RefIpCountryTable
@@ -272,6 +300,8 @@ Resources:
             TableName: !Ref RefErrorEventTable
         - DynamoDBWritePolicy:
             TableName: !Ref RefAwsApiTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RefPollCursorTable
         - !If
           - IsDemoMode
           - S3ReadPolicy:
@@ -290,6 +320,14 @@ Resources:
                 Action: sts:AssumeRole
                 Resource: !Ref CrossAccountS3RoleArn
           - !Ref AWS::NoValue
+      Events:
+        PollSchedule:
+          Type: Schedule
+          Condition: HasCrossAccountS3Role
+          Properties:
+            Schedule: !Ref PollSchedule
+            Description: 크로스 계정 역할 모드에서 S3 이벤트 알림 대신 버킷을 주기적으로 스캔
+            Enabled: true
 
   # S3(Log Archive 버킷) → Lambda invoke 권한 - 데모 모드 (같은 계정)
   RefTableProcessorInvokePermissionDemo:
@@ -302,11 +340,11 @@ Resources:
       SourceArn: !Sub "arn:aws:s3:::accesskey-detector-demo-trail-${Stage}-${AWS::AccountId}"
       SourceAccount: !Ref AWS::AccountId
 
-  # S3(Log Archive 버킷) → Lambda invoke 권한 - 기존 중앙 버킷 사용 (크로스 계정 가능)
-  # 실제 S3 이벤트 알림 설정은 버킷을 소유한 계정에서 별도로 등록해야 합니다. (배포 가이드 참고)
+  # S3(Log Archive 버킷) → Lambda invoke 권한 - 버킷 정책 기반 접근일 때만 필요.
+  # 크로스 계정 역할(폴링) 모드에서는 S3가 이 Lambda를 직접 호출하지 않으므로 불필요.
   RefTableProcessorInvokePermissionExisting:
     Type: AWS::Lambda::Permission
-    Condition: IsNotDemoMode
+    Condition: UseBucketPolicyApproach
     Properties:
       FunctionName: !Ref RefTableProcessorFunction
       Action: lambda:InvokeFunction
@@ -514,6 +552,8 @@ Outputs:
     Value: !Ref RefErrorEventTable
   RefAwsApiTableName:
     Value: !Ref RefAwsApiTable
+  RefPollCursorTableName:
+    Value: !Ref RefPollCursorTable
   DemoCloudTrailBucketName:
     Condition: IsDemoMode
     Value: !Ref DemoCloudTrailBucket

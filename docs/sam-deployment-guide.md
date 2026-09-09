@@ -17,10 +17,11 @@ Control Tower / Organization Trail 자체는 조직 전체에 걸친 별도 설�
 
 | 리소스 | 설명 |
 |---|---|
-| `ref-table-processor` Lambda | S3(CloudTrail 로그) → Reference Table 5종 적재 |
+| `ref-table-processor` Lambda | S3(CloudTrail 로그) → Reference Table 5종 적재. S3 이벤트 알림(데모/버킷정책 모드) 또는 EventBridge 폴링(크로스 계정 역할 모드)으로 트리거 |
 | `ref-suspicious-detector` Lambda | DynamoDB Streams → 탐지 시나리오 평가 → Slack/Teams 알림 |
 | `geoip-layer-builder` Lambda | MaxMind mmdb 갱신 확인 → Lambda Layer 재발행 → `ref-table-processor`에 자동 연결 (주기 실행) |
 | DynamoDB 테이블 5종 | `ref_ip_country`, `ref_region`, `ref_user_agent`, `ref_error_event`, `ref_aws_api` |
+| DynamoDB `ref_poll_cursor` 테이블 | 폴링 모드에서 (계정+리전)별 마지막 처리 위치를 저장 (다른 모드에서는 비어있음) |
 | (선택) 데모용 S3 버킷 + CloudTrail | Organization 환경이 없어도 엔드투엔드로 테스트할 수 있도록 하는 옵션 |
 
 실제 운영 환경(Control Tower + Organization Trail)에서는 CloudTrail 로그가 **다른 계정(Log
@@ -190,7 +191,8 @@ sam deploy --guided
 | Parameter GeoIpUpdateSchedule | GeoIP DB 갱신 주기 (기본 `rate(7 days)`) |
 | Parameter DeployDemoCloudTrail | **처음 테스트해보는 것이라면 `true`** 권장 (아래 6절 참고) |
 | Parameter ExistingCloudTrailBucketName / AccountId | `DeployDemoCloudTrail=false`일 때만 입력 |
-| Parameter CrossAccountS3RoleArn | `DeployDemoCloudTrail=false`일 때 사용. 처음 배포할 때는 비워두고, 6-2절에서 역할을 만든 뒤 재배포 시 지정 |
+| Parameter CrossAccountS3RoleArn | `DeployDemoCloudTrail=false`일 때 사용. 처음 배포할 때는 비워두고, 6-2절에서 역할을 만든 뒤 재배포 시 지정. 지정하면 폴링 모드가 자동으로 켜짐 |
+| Parameter PollSchedule | 폴링 모드(위 파라미터 지정 시)의 버킷 스캔 주기 (기본 `rate(5 minutes)`) |
 | Confirm changes before deploy | `Y` 권장 (변경 내용을 보고 승인) |
 | Allow SAM CLI IAM role creation | `Y` (Lambda 실행 역할 등을 생성해야 함) |
 | Disable rollback | `N` |
@@ -224,30 +226,39 @@ sam build && sam deploy
 `ExistingCloudTrailBucketAccountId`(그 버킷을 소유한 계정 ID)를 지정해야 합니다.
 
 버킷이 **다른 AWS 계정**에 있으므로, CloudFormation 한 스택만으로는 양쪽을 다 설정할 수
-없습니다. 이 스택은 "Lambda가 그 버킷으로부터의 호출을 허용한다"는 쪽(Lambda 리소스 정책)만
-자동으로 만들고, 아래 두 작업은 **Log Archive 계정에서 별도로** 실행해야 합니다: (1) 읽기
-권한 부여, (2) S3 이벤트 알림 등록.
+없습니다. **Log Archive 계정에서 해야 할 일은 크로스 계정 IAM 역할을 하나 만드는 것,
+그것뿐입니다.** S3 이벤트 알림은 등록하지 않습니다 — `ref-table-processor`는 이 역할이
+지정되면 S3 알림을 기다리는 대신, EventBridge 스케줄로 주기 실행되면서 스스로 버킷을
+스캔해 새 로그 파일을 찾아옵니다(폴링). Control Tower SCP가 버킷 알림 등록(`s3:PutBucket
+Notification`)까지 막는 경우가 많아 애초에 알림에 의존하지 않는 방식입니다.
 
 읽기 권한은 **크로스 계정 IAM 역할**로 부여합니다. Log Archive 계정의 버킷 정책 자체는
-건드리지 않습니다 — Control Tower 환경의 CloudTrail 버킷은 감사 로그 보호를 위해 버킷 정책
-변경이 SCP로 차단되어 있는 경우가 대부분이라, 애초에 버킷 정책을 편집하는 방식은 선택지가
-아닙니다. 대신 Log Archive 계정에 IAM 역할을 하나 만들고 `ref-table-processor`가 그 역할을
-assume해서 S3에 접근하게 합니다. 역할을 assume한 시점부터는 임시 자격증명이 Log Archive
-계정 소속이 되므로 같은 계정 접근과 동일하게 처리되고, 버킷 정책 수정이 필요 없습니다.
+건드리지 않습니다. Log Archive 계정에 IAM 역할을 하나 만들고 `ref-table-processor`가 그
+역할을 assume해서 S3에 접근하게 합니다. 역할을 assume한 시점부터는 임시 자격증명이 Log
+Archive 계정 소속이 되므로 같은 계정 접근과 동일하게 처리되고, 버킷 정책 수정이 필요
+없습니다.
+
+전체 흐름은 이렇습니다.
+
+```
+Audit 계정 (EventBridge Schedule)
+  → ref-table-processor Lambda
+      → AssumeRole
+        → Log Archive 계정의 accesskey-detector-cloudtrail-reader 역할
+          → S3 ListBucket / GetObject (같은 계정 접근으로 처리됨)
+```
 
 **아래 작업은 계정이 서로 다르므로, 어느 계정 콘솔에서 진행하는지 각 단계마다 명시했습니다.
 반드시 표시된 계정으로 콘솔 우측 상단에서 전환(스위치 롤/SSO 계정 변경)한 뒤 진행하세요.**
 
-#### Audit 계정에서 (1) — 필요한 값 확인
+#### Audit 계정에서 (1) — Lambda 실행 역할 확인
 
-**Lambda 콘솔** → 함수 목록에서 `ref-table-processor-<Stage값>` 클릭.
+**Lambda 콘솔** → 함수 목록에서 `ref-table-processor-<Stage값>` 클릭 → **Configuration(구성)**
+탭 → **Permissions(권한)** → **Execution role(실행 역할)** 섹션에 표시된 역할 이름을 클릭하면
+IAM 콘솔로 이동합니다. 그 페이지 상단의 **ARN**을 복사해둡니다. (뒤에서 Log Archive 쪽 신뢰
+정책에 사용)
 
-- 함수 이름 옆 **"ARN 복사"** 버튼으로 함수 ARN을 복사해둡니다. (뒤에서 S3 이벤트 알림 설정에 사용)
-- **Configuration(구성)** 탭 → **Permissions(권한)** → **Execution role(실행 역할)** 섹션에
-  표시된 역할 이름을 클릭하면 IAM 콘솔로 이동합니다. 그 페이지 상단의 **ARN**을 복사해둡니다.
-  (뒤에서 Log Archive 쪽 신뢰 정책에 사용)
-
-#### Log Archive 계정에서 — 크로스 계정 역할 생성 + 이벤트 알림 등록
+#### Log Archive 계정에서 — 크로스 계정 역할 생성
 
 **역할은 반드시 이 계정(버킷을 소유한 계정) 안에 만들어야 합니다.** Audit 계정에 만들면
 동작하지 않습니다 — Audit 계정에 만든 역할은 Log Archive 계정 소속이 아니므로, 그 역할을
@@ -282,16 +293,24 @@ assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 �
 
 **2) 읽기 권한 추가**
 
+폴링을 위해서는 객체를 읽는 `s3:GetObject`뿐 아니라 버킷 목록을 조회하는 `s3:ListBucket`도
+필요합니다.
+
 방금 만든 역할 페이지로 이동 → **Permissions(권한)** 탭 → **Add permissions** →
 **Create inline policy**
 
-- **JSON** 탭으로 전환 후 아래 내용을 붙여넣습니다. `Resource`의 버킷 이름을 실제 중앙
-  버킷 이름으로 바꾸세요.
+- **JSON** 탭으로 전환 후 아래 내용을 붙여넣습니다. 버킷 이름을 실제 중앙 버킷 이름으로
+  바꾸세요.
 
   ```json
   {
     "Version": "2012-10-17",
     "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": "s3:ListBucket",
+        "Resource": "arn:aws:s3:::<중앙버킷이름>"
+      },
       {
         "Effect": "Allow",
         "Action": "s3:GetObject",
@@ -304,23 +323,8 @@ assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 �
 - **Next** → Policy name: `read-cloudtrail-logs` → **Create policy**
 - 역할 페이지 상단의 **ARN**을 복사해둡니다 (Audit 계정 재배포에 필요).
 
-**3) S3 이벤트 알림 등록**
-
-읽기 권한과는 별개로 반드시 필요한 작업입니다.
-
-**S3 콘솔** → 중앙 버킷(예: `aws-controltower-cloudtrail-logs-...`) 클릭 → **Properties(속성)**
-탭 → 아래로 스크롤하여 **Event notifications(이벤트 알림)** → **Create event notification**
-
-- **Event name**: 원하는 이름 (예: `ref-table-processor-trigger`)
-- **Suffix**: `.json.gz` 입력 (Prefix는 비워둠)
-- **Event types**: **All object create events**(또는 `PUT`만 개별 선택 가능하면 `PUT`만) 체크
-- **Destination**: **Lambda function** 선택 → **Enter Lambda function ARN** 옵션 선택
-  (크로스 계정이라 드롭다운에 목록이 안 뜨므로 직접 입력해야 합니다) → Audit 계정에서
-  복사해둔 `RefTableProcessorFunction` ARN 붙여넣기
-- **Save changes**
-
-> 기존에 이미 등록된 이벤트 알림이 있다면 이 알림이 그것들을 덮어쓰지 않고 추가되는지
-> 확인하세요 (콘솔은 기존 알림 목록을 함께 보여줍니다).
+이것으로 Log Archive 계정에서 할 일은 끝입니다. 이 버킷에는 그 외 어떤 설정도(버킷 정책,
+이벤트 알림 등) 추가하지 않습니다.
 
 #### Audit 계정에서 (2) — 크로스 계정 역할 ARN으로 재배포
 
@@ -334,8 +338,12 @@ assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 �
 - 검토 화면에서 **"I acknowledge that AWS CloudFormation might create IAM resources"**
   체크 → **Update stack(스택 업데이트)**
 
-이렇게 배포하면 `ref-table-processor`가 이 역할을 자동으로 assume해서 S3를 읽습니다
-(`src/ref_table_processor/app.py`의 `get_s3_client()` 참고).
+`CrossAccountS3RoleArn`이 채워진 채로 배포되면, 템플릿이 자동으로 EventBridge Schedule
+(`PollSchedule` 파라미터, 기본 5분)을 활성화합니다. `ref-table-processor`는 이 스케줄로
+호출될 때마다 이 역할을 assume해서 버킷을 스캔하고, 마지막으로 처리한 위치를
+`ref_poll_cursor` 테이블에 기억해뒀다가 다음 폴링에서 신규 파일만 가져옵니다
+(`src/ref_table_processor/app.py`의 `get_s3_client()` / `poll_bucket_for_new_logs()` 참고).
+별도로 켜거나 등록할 것은 없습니다.
 
 > CLI로 재배포하려면 `sam deploy --guided`를 다시 실행해 전체 파라미터를 한 번에 다시
 > 입력하거나, `samconfig.toml`의 `parameter_overrides`에 `CrossAccountS3RoleArn=<위 ARN>`을
@@ -372,6 +380,25 @@ aws lambda get-function-configuration \
 데모 모드로 배포했다면, 실제로 아무 IAM 사용자의 Access Key로 AWS CLI 명령을 몇 번 호출해보면
 (예: `aws sts get-caller-identity`, `aws iam list-users`) 약 5분 내(CloudTrail 배치 주기) 해당
 계정의 CloudTrail 로그가 데모 버킷에 쌓이고, `ref-table-processor`가 트리거됩니다.
+
+### 8-1-B. 폴링 모드(크로스 계정 역할): 수동으로 한 번 실행해보기
+
+`PollSchedule`(기본 5분) 주기를 기다리지 않고 바로 확인하려면 직접 한 번 호출해봅니다.
+
+```bash
+aws lambda invoke \
+  --function-name ref-table-processor-<Stage값> \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{}' \
+  /tmp/poll-output.json
+```
+
+CloudWatch Logs(8-3절)에서 처리한 파일 수가 로그로 찍히는지 확인하고, `ref_poll_cursor-<Stage값>`
+테이블에 (계정+리전) prefix별 커서가 생겼는지 확인합니다.
+
+```bash
+aws dynamodb scan --table-name ref_poll_cursor-<Stage값>
+```
 
 ### 8-2. DynamoDB 테이블 확인
 
@@ -502,9 +529,9 @@ sam delete
 | `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. 1-2절의 사내 PyPI 미러 설정(`PIP_INDEX_URL` 등)을 확인하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
 | 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. 1-3절대로 `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
-| `ref-table-processor`가 트리거되지 않음 (기존 버킷 모드) | 6-2절의 크로스 계정 역할 + S3 이벤트 알림 등록이 Log Archive 계정에서 실제로 적용됐는지 확인 |
+| `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
-| Log Archive 계정에서 S3 이벤트 알림 등록(`put-bucket-notification-configuration`)이 SCP로 거부됨 | 조직의 Control Tower/보안 담당자에게 이 등록을 대신 실행해달라고 요청 |
+| `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정에 만든 역할의 인라인 정책에 `ListBucket`(버킷 자체 ARN)과 `GetObject`(`/*` ARN)가 모두 있는지 확인 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
 | 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
 | `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
@@ -541,6 +568,12 @@ sam delete
    정책을 편집할 수 없는 환경을 위해, `CROSS_ACCOUNT_S3_ROLE_ARN` 환경변수가 설정되어 있으면
    해당 역할을 `sts:AssumeRole`로 위임받아 S3에 접근하는 `get_s3_client()`를 추가했습니다.
    설정하지 않으면 기존과 동일하게 자기 자신의 실행 역할로 S3에 접근합니다. (6-2절 참고)
+10. `ref-table-processor.py`: S3 이벤트 알림 자체가 SCP로 막혀있는 환경을 위해, S3 Records가
+    없는 호출(EventBridge Schedule)을 받으면 `poll_bucket_for_new_logs()`로 버킷을 직접
+    스캔하는 폴링 모드를 추가했습니다. `AWSLogs/<Org>/<Account>/CloudTrail/<Region>/` 구조를
+    delimiter 기반으로 얕게 탐색해 계정·리전을 자동으로 찾고, (계정+리전)별로 마지막 처리
+    위치를 `ref_poll_cursor` 테이블에 저장해 다음 폴링에서 신규 파일만 가져옵니다.
+    `CrossAccountS3RoleArn`이 설정된 경우에만 활성화됩니다. (6-2절 참고)
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**
 

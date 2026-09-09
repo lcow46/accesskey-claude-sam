@@ -13,6 +13,11 @@ logger.setLevel(logging.INFO)
 # 지정하면 이 역할을 assume해서 S3를 읽으므로, 버킷 정책 수정이 전혀 필요 없다.
 CROSS_ACCOUNT_S3_ROLE_ARN = os.environ.get("CROSS_ACCOUNT_S3_ROLE_ARN", "")
 
+# 폴링 모드: S3 이벤트 알림 없이, 이 함수가 주기 실행(EventBridge Schedule)될 때마다
+# 스스로 버킷을 스캔해서 새 로그 파일을 찾는다. POLL_BUCKET_NAME이 설정된 경우에만 동작.
+POLL_BUCKET_NAME = os.environ.get("POLL_BUCKET_NAME", "")
+POLL_CURSOR_TABLE_NAME = os.environ.get("POLL_CURSOR_TABLE", "")
+
 _default_s3_client = boto3.client("s3")
 _cross_account_s3_client = None
 _cross_account_s3_client_expiry = None
@@ -27,6 +32,9 @@ aws_api_table = dynamodb.Table(os.environ["AWS_API_TABLE"])
 region_table = dynamodb.Table(os.environ["REGION_TABLE"])
 user_agent_table = dynamodb.Table(os.environ["USER_AGENT_TABLE"])
 
+# 폴링 커서 저장용 (버킷 이벤트 알림을 쓰지 않는 폴링 모드에서만 사용)
+poll_cursor_table = dynamodb.Table(POLL_CURSOR_TABLE_NAME) if POLL_CURSOR_TABLE_NAME else None
+
 try:
     import geoip2.database
     geo_reader = geoip2.database.Reader("/opt/GeoLite2-City.mmdb")
@@ -39,14 +47,106 @@ except Exception as e:
 # 메인 핸들러 및 테이블 적재 로직
 # -----------------------------------------------------------------------
 def lambda_handler(event, context):
-    for record in event.get("Records", []):
-        bucket = record["s3"]["bucket"]["name"]
-        key = record["s3"]["object"]["key"]
+    # S3 이벤트 알림으로 호출된 경우 (데모 모드, 또는 버킷 정책이 허용되는 환경)
+    if event.get("Records"):
+        for record in event["Records"]:
+            bucket = record["s3"]["bucket"]["name"]
+            key = record["s3"]["object"]["key"]
 
-        try:
-            process_cloudtrail_file(bucket, key)
-        except Exception as e:
-            logger.error(f"파일 처리 실패 - bucket: {bucket}, key: {key}, error: {e}")
+            try:
+                process_cloudtrail_file(bucket, key)
+            except Exception as e:
+                logger.error(f"파일 처리 실패 - bucket: {bucket}, key: {key}, error: {e}")
+        return
+
+    # EventBridge Schedule로 호출된 경우 (폴링 모드: S3 이벤트 알림을 쓰지 않음)
+    if POLL_BUCKET_NAME:
+        poll_bucket_for_new_logs()
+
+
+# -----------------------------------------------------------------------
+# 폴링 모드: S3 이벤트 알림 없이 버킷을 직접 스캔
+# -----------------------------------------------------------------------
+def poll_bucket_for_new_logs():
+    """
+    Organization Trail 버킷 키 구조(AWSLogs/<OrgId>/<AccountId>/CloudTrail/<Region>/...)를
+    delimiter 기반으로 얕게 탐색해 (계정, 리전) 조합을 자동으로 찾아내고, 각 조합별로
+    마지막으로 처리한 키 이후의 신규 객체만 순서대로 가져와 처리한다. 계정/리전 목록을
+    미리 설정해둘 필요가 없어 조직에 계정이 추가되어도 별도 설정 변경이 필요 없다.
+    """
+    s3 = get_s3_client()
+
+    for org_prefix in list_common_prefixes(s3, "AWSLogs/"):
+        for account_prefix in list_common_prefixes(s3, org_prefix):
+            cloudtrail_prefix = f"{account_prefix}CloudTrail/"
+            for region_prefix in list_common_prefixes(s3, cloudtrail_prefix):
+                poll_prefix(s3, region_prefix)
+
+
+def list_common_prefixes(s3, prefix: str) -> list:
+    """prefix 바로 아래 단계의 '폴더'만 나열한다 (객체 내용은 가져오지 않아 가볍다)."""
+    prefixes = []
+    kwargs = {"Bucket": POLL_BUCKET_NAME, "Prefix": prefix, "Delimiter": "/"}
+    while True:
+        resp = s3.list_objects_v2(**kwargs)
+        prefixes.extend(p["Prefix"] for p in resp.get("CommonPrefixes", []))
+        if not resp.get("IsTruncated"):
+            break
+        kwargs["ContinuationToken"] = resp["NextContinuationToken"]
+    return prefixes
+
+
+def poll_prefix(s3, prefix: str):
+    """
+    이 prefix(계정+리전 단위) 안에서 마지막으로 처리한 키 이후의 .json.gz 객체를 순서대로
+    가져와 처리한다. 같은 계정+리전 안에서는 키에 포함된 연/월/일/타임스탬프가 문자열
+    정렬 순서와 일치하므로, StartAfter만으로 안전하게 "신규 파일만" 가져올 수 있다.
+    """
+    cursor = get_poll_cursor(prefix)
+    last_seen_key = cursor
+    continuation_token = None
+
+    while True:
+        kwargs = {"Bucket": POLL_BUCKET_NAME, "Prefix": prefix}
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+        elif cursor:
+            kwargs["StartAfter"] = cursor
+
+        resp = s3.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith(".json.gz"):
+                continue
+            try:
+                process_cloudtrail_file(POLL_BUCKET_NAME, key)
+            except Exception as e:
+                logger.error(f"파일 처리 실패 - key: {key}, error: {e}")
+            last_seen_key = key
+
+        if not resp.get("IsTruncated"):
+            break
+        continuation_token = resp["NextContinuationToken"]
+
+    if last_seen_key != cursor:
+        save_poll_cursor(prefix, last_seen_key)
+
+
+def get_poll_cursor(prefix: str) -> str:
+    if not poll_cursor_table:
+        return ""
+    try:
+        res = poll_cursor_table.get_item(Key={"prefix": prefix})
+        return res.get("Item", {}).get("lastKey", "")
+    except Exception as e:
+        logger.warning(f"폴링 커서 조회 실패 - prefix: {prefix}, error: {e}")
+        return ""
+
+
+def save_poll_cursor(prefix: str, last_key: str):
+    if not poll_cursor_table or not last_key:
+        return
+    poll_cursor_table.put_item(Item={"prefix": prefix, "lastKey": last_key})
 
 
 def get_s3_client():
