@@ -69,18 +69,47 @@ def lambda_handler(event, context):
 # -----------------------------------------------------------------------
 def poll_bucket_for_new_logs():
     """
-    Organization Trail 버킷 키 구조(AWSLogs/<OrgId>/<AccountId>/CloudTrail/<Region>/...)를
+    Organization Trail 버킷 키 구조(<AWSLogs 루트>/<OrgId>/<AccountId>/CloudTrail/<Region>/...)를
     delimiter 기반으로 얕게 탐색해 (계정, 리전) 조합을 자동으로 찾아내고, 각 조합별로
     마지막으로 처리한 키 이후의 신규 객체만 순서대로 가져와 처리한다. 계정/리전 목록을
     미리 설정해둘 필요가 없어 조직에 계정이 추가되어도 별도 설정 변경이 필요 없다.
+
+    "AWSLogs/" 폴더가 버킷 루트에 바로 있는 구조와, 조직 ID 폴더가 한 번 더 감싸는
+    구조(<OrgId>/AWSLogs/<OrgId>/...) 둘 다 지원하기 위해 find_awslogs_prefixes()로
+    실제 위치를 먼저 찾는다.
     """
     s3 = get_s3_client()
 
-    for org_prefix in list_common_prefixes(s3, "AWSLogs/"):
-        for account_prefix in list_common_prefixes(s3, org_prefix):
-            cloudtrail_prefix = f"{account_prefix}CloudTrail/"
-            for region_prefix in list_common_prefixes(s3, cloudtrail_prefix):
-                poll_prefix(s3, region_prefix)
+    awslogs_prefixes = find_awslogs_prefixes(s3)
+    logger.info(f"[폴링] AWSLogs 루트 {len(awslogs_prefixes)}개 발견: {awslogs_prefixes}")
+
+    region_count = 0
+    for awslogs_prefix in awslogs_prefixes:
+        for org_prefix in list_common_prefixes(s3, awslogs_prefix):
+            for account_prefix in list_common_prefixes(s3, org_prefix):
+                cloudtrail_prefix = f"{account_prefix}CloudTrail/"
+                for region_prefix in list_common_prefixes(s3, cloudtrail_prefix):
+                    region_count += 1
+                    poll_prefix(s3, region_prefix)
+
+    logger.info(f"[폴링] 총 {region_count}개 (계정+리전) 조합 스캔 완료")
+
+
+def find_awslogs_prefixes(s3, prefix: str = "", depth: int = 0) -> list:
+    """
+    "AWSLogs/" 폴더가 버킷 루트에 바로 있는 경우와, 조직 ID 폴더가 한 번 더 감싸는
+    경우(<OrgId>/AWSLogs/<OrgId>/...)를 모두 지원하기 위해, 최대 2단계까지 내려가며
+    이름이 정확히 "AWSLogs"인 폴더를 찾는다.
+    """
+    if depth > 2:
+        return []
+    found = []
+    for sub_prefix in list_common_prefixes(s3, prefix):
+        if sub_prefix.endswith("AWSLogs/"):
+            found.append(sub_prefix)
+        else:
+            found.extend(find_awslogs_prefixes(s3, sub_prefix, depth + 1))
+    return found
 
 
 def list_common_prefixes(s3, prefix: str) -> list:
@@ -105,6 +134,7 @@ def poll_prefix(s3, prefix: str):
     cursor = get_poll_cursor(prefix)
     last_seen_key = cursor
     continuation_token = None
+    processed_count = 0
 
     while True:
         kwargs = {"Bucket": POLL_BUCKET_NAME, "Prefix": prefix}
@@ -120,6 +150,7 @@ def poll_prefix(s3, prefix: str):
                 continue
             try:
                 process_cloudtrail_file(POLL_BUCKET_NAME, key)
+                processed_count += 1
             except Exception as e:
                 logger.error(f"파일 처리 실패 - key: {key}, error: {e}")
             last_seen_key = key
@@ -127,6 +158,8 @@ def poll_prefix(s3, prefix: str):
         if not resp.get("IsTruncated"):
             break
         continuation_token = resp["NextContinuationToken"]
+
+    logger.info(f"[폴링] {prefix}: 신규 파일 {processed_count}개 처리 (커서: {cursor or '없음'} -> {last_seen_key or '없음'})")
 
     if last_seen_key != cursor:
         save_poll_cursor(prefix, last_seen_key)

@@ -475,6 +475,7 @@ sam delete
 | 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
+| `ref-table-processor` 로그에 `[폴링] AWSLogs 루트 0개 발견`만 찍히고 실행 시간이 100ms 미만으로 매우 짧음 | 버킷의 실제 최상위 구조가 `AWSLogs/`도 `<OrgId>/AWSLogs/`도 아닌 경우입니다. S3 콘솔에서 버킷 루트 폴더 구조를 직접 확인하고, `find_awslogs_prefixes()`의 `depth` 상한(현재 2단계)을 늘려야 할 수도 있습니다 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
 | `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정 역할의 인라인 정책을 콘솔로 수정하다가 `GetObject` statement를 중복으로 남기고 `ListBucket`을 빠뜨리는 실수가 잦습니다. `aws iam get-role-policy --role-name accesskey-detector-cloudtrail-reader --policy-name read-cloudtrail-logs`로 실제 서버에 저장된 내용을 직접 확인하세요 (콘솔 화면과 다를 수 있습니다) — `ListBucket`은 버킷 자체 ARN(`/*` 없음), `GetObject`는 `/*` 붙은 ARN이어야 합니다 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
@@ -520,6 +521,12 @@ sam delete
     delimiter 기반으로 얕게 탐색해 계정·리전을 자동으로 찾고, (계정+리전)별로 마지막 처리
     위치를 `ref_poll_cursor` 테이블에 저장해 다음 폴링에서 신규 파일만 가져옵니다.
     `CrossAccountS3RoleArn`이 설정된 경우에만 활성화됩니다. (6-2절 참고)
+
+    **버킷 구조 관련 주의:** Control Tower 랜딩존 버전에 따라 `AWSLogs/`가 버킷 루트에 바로
+    있는 경우도 있고, 조직 ID 폴더가 한 번 더 감싸는 경우(`<OrgId>/AWSLogs/<OrgId>/...`)도
+    있습니다. `find_awslogs_prefixes()`가 최대 2단계까지 내려가며 `AWSLogs/` 폴더를 찾으므로
+    두 구조 모두 자동으로 처리되지만, 폴링이 계속 아무것도 처리하지 못한다면(아래 트러블슈팅
+    참고) 실제 버킷 구조가 이 두 패턴과도 다른 건 아닌지 콘솔에서 직접 확인해보세요.
 11. `geoip-layer-builder.py`: `publish_layer()`가 zip 바이트를 `publish_layer_version`
     요청에 직접 담아 보내던 방식(`Content.ZipFile`, 50MB 제한)을 S3 경유 방식
     (`Content.S3Bucket`/`S3Key`)으로 바꿨습니다. 최신 `GeoLite2-City.mmdb`는 이미 50MB를
