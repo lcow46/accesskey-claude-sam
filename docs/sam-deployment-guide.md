@@ -370,7 +370,30 @@ Layer ARN이 하나 나오면(예: `arn:aws:lambda:<리전>:<계정ID>:layer:geo
 (예: `aws sts get-caller-identity`, `aws iam list-users`) 약 5분 내(CloudTrail 배치 주기) 해당
 계정의 CloudTrail 로그가 데모 버킷에 쌓이고, `ref-table-processor`가 트리거됩니다.
 
+> **`ref-table-processor`는 `userIdentity.accessKeyId`가 `AKIA`로 시작하는 이벤트만
+> 처리합니다.** AWS SSO/IAM Identity Center로 로그인해서 얻은 임시 자격증명(Assumed
+> Role)의 Access Key는 `ASIA`로 시작하므로 전부 걸러집니다. 즉 SSO 콘솔/CLI 세션으로 아무리
+> API를 호출해도 DynamoDB에는 절대 적재되지 않습니다 — 테스트하려면 반드시 **장기 IAM
+> 사용자 Access Key**(`aws iam create-access-key`로 발급한 것)로 호출해야 합니다.
+>
+> ```bash
+> aws iam create-user --user-name accesskey-detector-test-user
+> aws iam create-access-key --user-name accesskey-detector-test-user
+> aws configure --profile akia-test   # 위에서 받은 AKIA 키/시크릿 입력
+> aws sts get-caller-identity --profile akia-test
+> ```
+>
+> 테스트가 끝나면 보안을 위해 이 테스트용 키/사용자는 바로 삭제하세요.
+>
+> ```bash
+> aws iam delete-access-key --user-name accesskey-detector-test-user --access-key-id <AccessKeyId>
+> aws iam delete-user --user-name accesskey-detector-test-user
+> ```
+
 ### 8-1-B. 폴링 모드(크로스 계정 역할): 수동으로 한 번 실행해보기
+
+여기서도 8-1절의 **`AKIA` 전용 필터**가 동일하게 적용됩니다 — SSO 세션(`ASIA`)으로 아무리
+호출해도 적재되지 않으니, 먼저 8-1절 방식으로 실제 `AKIA` 이벤트를 만들어두세요.
 
 `PollSchedule`(기본 5분) 주기를 기다리지 않고 바로 확인하려면 직접 한 번 호출해봅니다.
 
