@@ -274,7 +274,9 @@ Resources:
       Description: CloudTrail 로그 파일을 파싱하여 Reference Table 5종에 적재
       CodeUri: src/ref_table_processor/
       Handler: app.lambda_handler
-      Timeout: 60
+      # 폴링 모드에서 계정/리전 조합이 많으면 한 번에 스캔하는 데 시간이 걸릴 수 있어
+      # 넉넉하게 잡음 (기본 PollSchedule 5분보다 짧게 유지해 다음 트리거와 크게 겹치지 않게 함).
+      Timeout: 270
       MemorySize: 512
       Environment:
         Variables:

@@ -35,6 +35,13 @@ user_agent_table = dynamodb.Table(os.environ["USER_AGENT_TABLE"])
 # 폴링 커서 저장용 (버킷 이벤트 알림을 쓰지 않는 폴링 모드에서만 사용)
 poll_cursor_table = dynamodb.Table(POLL_CURSOR_TABLE_NAME) if POLL_CURSOR_TABLE_NAME else None
 
+# 폴링 모드: 이번 호출에서 다음 (계정+리전) 조합으로 넘어가지 않고 멈출지 판단하는 안전 여유
+# 시간(ms). 계정/리전이 많으면 한 번의 호출로 전부 못 돌 수 있는데, 이 값을 넘기면 지금까지
+# 처리한 곳까지만 커서를 저장하고 중단한다 (실제 파일 처리는 하지 않고 예외로 죽는 것과 달리,
+# 다음 스케줄 폴링에서 정확히 이어서 진행되도록 하기 위함).
+POLL_TIME_BUDGET_MS = 20000
+POLL_RESUME_KEY = "__resume_after__"
+
 try:
     import geoip2.database
     geo_reader = geoip2.database.Reader("/opt/GeoLite2-City.mmdb")
@@ -61,13 +68,13 @@ def lambda_handler(event, context):
 
     # EventBridge Schedule로 호출된 경우 (폴링 모드: S3 이벤트 알림을 쓰지 않음)
     if POLL_BUCKET_NAME:
-        poll_bucket_for_new_logs()
+        poll_bucket_for_new_logs(context)
 
 
 # -----------------------------------------------------------------------
 # 폴링 모드: S3 이벤트 알림 없이 버킷을 직접 스캔
 # -----------------------------------------------------------------------
-def poll_bucket_for_new_logs():
+def poll_bucket_for_new_logs(context=None):
     """
     Organization Trail 버킷 키 구조(<AWSLogs 루트>/<OrgId>/<AccountId>/CloudTrail/<Region>/...)를
     delimiter 기반으로 얕게 탐색해 (계정, 리전) 조합을 자동으로 찾아내고, 각 조합별로
@@ -77,22 +84,49 @@ def poll_bucket_for_new_logs():
     "AWSLogs/" 폴더가 버킷 루트에 바로 있는 구조와, 조직 ID 폴더가 한 번 더 감싸는
     구조(<OrgId>/AWSLogs/<OrgId>/...) 둘 다 지원하기 위해 find_awslogs_prefixes()로
     실제 위치를 먼저 찾는다.
+
+    계정/리전 조합이 많으면 한 번의 Lambda 호출(제한 시간 안)로 전부 스캔하지 못할 수 있다.
+    이때 매번 같은 순서(계정 ID 문자열 정렬)로 처음부터 다시 돌면, 정렬상 앞쪽에 오는 계정만
+    계속 처리되고 뒤쪽 계정은 영원히 처리되지 못하는 문제가 생긴다. 이를 피하기 위해 지난
+    호출에서 어디까지 처리했는지를 커서 테이블에 기록해두고, 이번 호출은 그 다음 조합부터
+    순환(마지막 다음은 다시 처음으로) 이어서 처리한다.
     """
     s3 = get_s3_client()
 
-    awslogs_prefixes = find_awslogs_prefixes(s3)
-    logger.info(f"[폴링] AWSLogs 루트 {len(awslogs_prefixes)}개 발견: {awslogs_prefixes}")
-
-    region_count = 0
-    for awslogs_prefix in awslogs_prefixes:
+    all_prefixes = []
+    for awslogs_prefix in find_awslogs_prefixes(s3):
         for org_prefix in list_common_prefixes(s3, awslogs_prefix):
             for account_prefix in list_common_prefixes(s3, org_prefix):
                 cloudtrail_prefix = f"{account_prefix}CloudTrail/"
-                for region_prefix in list_common_prefixes(s3, cloudtrail_prefix):
-                    region_count += 1
-                    poll_prefix(s3, region_prefix)
+                all_prefixes.extend(list_common_prefixes(s3, cloudtrail_prefix))
 
-    logger.info(f"[폴링] 총 {region_count}개 (계정+리전) 조합 스캔 완료")
+    all_prefixes.sort()
+    logger.info(f"[폴링] (계정+리전) 조합 {len(all_prefixes)}개 발견")
+
+    if not all_prefixes:
+        return
+
+    resume_after = get_poll_cursor(POLL_RESUME_KEY)
+    start_index = 0
+    if resume_after in all_prefixes:
+        start_index = (all_prefixes.index(resume_after) + 1) % len(all_prefixes)
+
+    processed = 0
+    for i in range(len(all_prefixes)):
+        prefix = all_prefixes[(start_index + i) % len(all_prefixes)]
+        poll_prefix(s3, prefix)
+        processed += 1
+        save_poll_cursor(POLL_RESUME_KEY, prefix)
+
+        remaining_ms = context.get_remaining_time_in_millis() if context else None
+        if remaining_ms is not None and remaining_ms < POLL_TIME_BUDGET_MS:
+            logger.info(
+                f"[폴링] 시간 예산 소진으로 {processed}/{len(all_prefixes)}개 처리 후 중단 "
+                f"(다음 폴링에서 '{prefix}' 다음부터 이어서 진행)"
+            )
+            return
+
+    logger.info(f"[폴링] {processed}개 (계정+리전) 조합 모두 처리 완료 (다음 폴링은 처음부터 다시 순환)")
 
 
 def find_awslogs_prefixes(s3, prefix: str = "", depth: int = 0) -> list:

@@ -480,6 +480,7 @@ sam delete
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
 | `ref-table-processor` 로그에 `[폴링] AWSLogs 루트 0개 발견`만 찍히고 실행 시간이 100ms 미만으로 매우 짧음 | 버킷의 실제 최상위 구조가 `AWSLogs/`도 `<OrgId>/AWSLogs/`도 아닌 경우입니다. S3 콘솔에서 버킷 루트 폴더 구조를 직접 확인하고, `find_awslogs_prefixes()`의 `depth` 상한(현재 2단계)을 늘려야 할 수도 있습니다 |
+| "총 N개 이벤트 파싱 시작" 로그는 찍히는데 원하는 계정의 데이터가 안 보임 | 조직에 계정/리전이 많으면 한 번의 폴링으로 전부 못 돌 수 있습니다. `ref_poll_cursor-<Stage값>` 테이블에서 `__resume_after__` 항목의 값을 확인해 지금 어디까지 순환했는지 보고, 몇 차례(스케줄 주기만큼) 더 기다리거나 강제로 여러 번 invoke 해보세요 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
 | `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정 역할의 인라인 정책을 콘솔로 수정하다가 `GetObject` statement를 중복으로 남기고 `ListBucket`을 빠뜨리는 실수가 잦습니다. `aws iam get-role-policy --role-name accesskey-detector-cloudtrail-reader --policy-name read-cloudtrail-logs`로 실제 서버에 저장된 내용을 직접 확인하세요 (콘솔 화면과 다를 수 있습니다) — `ListBucket`은 버킷 자체 ARN(`/*` 없음), `GetObject`는 `/*` 붙은 ARN이어야 합니다 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
@@ -536,6 +537,12 @@ sam delete
     (`Content.S3Bucket`/`S3Key`)으로 바꿨습니다. 최신 `GeoLite2-City.mmdb`는 이미 50MB를
     넘는 경우가 많아, 원래 코드는 실제로는 거의 항상 실패하는 구조였습니다. 이를 위해
     스테이징 전용 S3 버킷(`GeoIpLayerBuildBucket`, 1일 후 자동 만료)을 새로 추가했습니다.
+12. `ref-table-processor.py`: 폴링 대상 (계정+리전) 조합이 많으면 Lambda 제한 시간(60초) 안에
+    다 못 도는데, 매번 같은 순서(계정 ID 문자열 정렬)로 처음부터 다시 돌면 정렬상 뒤쪽 계정은
+    영원히 처리되지 못하는 문제가 있었습니다. 이번 호출에서 어디까지 처리했는지를
+    `ref_poll_cursor` 테이블에 저장해두고, 다음 호출은 그 다음 조합부터 순환 이어서 처리하도록
+    바꿨습니다 (`context.get_remaining_time_in_millis()`로 시간 예산을 확인). `template.yaml`의
+    `Timeout`도 60초 → 270초로 늘렸습니다.
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**
 
