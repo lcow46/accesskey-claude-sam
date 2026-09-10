@@ -15,6 +15,10 @@ AWS SAM CLI로 빌드·배포하는 방법을 처음부터 끝까지 안내합�
 Control Tower / Organization Trail 자체는 조직 전체에 걸친 별도 설정이라 하나의 SAM 스택으로
 만들 수 없습니다. 그래서 이 프로젝트는 **Audit 계정에서 관리하는 부분**을 SAM으로 구현합니다.
 
+![실제 구현된 아키텍처](images/architecture-drawio-preview.png)
+
+편집 가능한 원본은 [images/architecture.drawio](images/architecture.drawio)이며, [draw.io](https://app.diagrams.net)에서 열 수 있습니다. (`docs/architecture.md`의 구성도는 최초 설계 당시의 개념도이고, 이 다이어그램은 6-2절의 크로스 계정 역할 + 폴링 방식으로 실제 구현된 최종 모습을 반영합니다.)
+
 | 리소스 | 설명 |
 |---|---|
 | `ref-table-processor` Lambda | S3(CloudTrail 로그) → Reference Table 5종 적재. S3 이벤트 알림(데모/버킷정책 모드) 또는 EventBridge 폴링(크로스 계정 역할 모드)으로 트리거 |
