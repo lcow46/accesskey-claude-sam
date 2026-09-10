@@ -109,7 +109,12 @@ aws secretsmanager create-secret \
 ```
 
 시크릿 이름을 위 기본값과 다르게 만들었다면, 배포 시 `NotificationSecretName` /
-`MaxMindSecretName` 파라미터로 그 이름을 지정하면 됩니다.
+`MaxMindSecretName` 파라미터로 **그 이름과 정확히 일치하는 값**을 지정하세요. 이 파라미터
+값은 Lambda 환경변수뿐 아니라 IAM 정책의 Resource ARN 패턴(`secret:<이 값>-*`)에도 그대로
+쓰입니다. 그래서 배포 이후 시크릿 이름을 바꿔야 한다면 **반드시 이 파라미터를 바꿔서
+`sam deploy`로 재배포**해야 합니다 — Lambda 콘솔에서 환경변수만 직접 고치면 이름은
+맞아떨어지지만 IAM 정책은 예전 값 그대로 남아있어서, `ResourceNotFoundException`이
+`AccessDeniedException`으로 바뀔 뿐 여전히 실패합니다.
 
 ## 4. 빌드
 
@@ -149,8 +154,8 @@ sam deploy --guided
 | Parameter Stage | `dev`, `prod` 등 환경 구분자 |
 | Parameter NotificationProvider | `slack` 또는 `teams` |
 | Parameter SlackChannelId | Slack 채널 ID (예: `C0123456789`). `NotificationProvider=teams`면 비워둠 |
-| Parameter NotificationSecretName | 3단계에서 만든 알림 자격 증명 시크릿 이름 (기본값 그대로 써도 됨) |
-| Parameter MaxMindSecretName | 3단계에서 만든 시크릿 이름 (기본값 그대로 써도 됨) |
+| Parameter NotificationSecretName | 3단계에서 만든 알림 자격 증명 시크릿 이름과 **정확히 일치**해야 함 (기본값 그대로 만들었다면 그대로 써도 됨) |
+| Parameter MaxMindSecretName | 3단계에서 만든 시크릿 이름과 **정확히 일치**해야 함 (기본값 그대로 만들었다면 그대로 써도 됨) |
 | Parameter AllowedCountries | 허용 국가코드, 콤마 구분 (예: `KR`) |
 | Parameter AllowedRegions | 허용 리전, 콤마 구분 (예: `ap-northeast-2`) |
 | Parameter ErrorThreshold | 시나리오 3 임계값 (기본 5) |
@@ -451,7 +456,8 @@ sam delete
 | `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정 역할의 인라인 정책을 콘솔로 수정하다가 `GetObject` statement를 중복으로 남기고 `ListBucket`을 빠뜨리는 실수가 잦습니다. `aws iam get-role-policy --role-name accesskey-detector-cloudtrail-reader --policy-name read-cloudtrail-logs`로 실제 서버에 저장된 내용을 직접 확인하세요 (콘솔 화면과 다를 수 있습니다) — `ListBucket`은 버킷 자체 ARN(`/*` 없음), `GetObject`는 `/*` 붙은 ARN이어야 합니다 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
 | 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
-| `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
+| `ResourceNotFoundException` (Secrets Manager, `Secrets Manager can't find the specified secret`) | `NotificationSecretName`/`MaxMindSecretName` 파라미터 값이 실제 시크릿 이름과 정확히 다른지(오타, 접두사/접미사 누락 등) 확인. `aws secretsmanager list-secrets`로 실제 이름을 확인하세요 |
+| `AccessDeniedException` (Secrets Manager, `GetSecretValue`) | 이름은 맞는데 권한이 없는 경우입니다. **Lambda 콘솔에서 환경변수만 직접 고쳤다면 이게 원인**일 가능성이 높습니다 — IAM 정책의 Resource ARN 패턴(`...secret:<파라미터 값>-*`)은 배포 당시 `NotificationSecretName`/`MaxMindSecretName` 파라미터 값 그대로 고정되어 있어서, 환경변수만 바꾼다고 같이 바뀌지 않습니다. 콘솔에서 역할에 인라인 정책을 수동으로 덧붙이지 말고, 해당 파라미터 값을 실제 시크릿 이름과 일치시켜 `sam deploy`로 재배포하세요 |
 
 ## 11. 원본 Lambda 코드 대비 변경 사항
 
