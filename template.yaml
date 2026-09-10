@@ -486,6 +486,29 @@ Resources:
   # geoip-layer-builder : MaxMind GeoLite2-City.mmdb 신규 버전 감지 시
   # Lambda Layer로 발행 후 ref-table-processor에 자동 연결 (주기 실행)
   # ---------------------------------------------------------------------
+  # geoip-layer-builder가 zip을 Layer로 발행하기 전에 잠시 올려두는 스테이징 버킷.
+  # publish_layer_version을 요청 본문에 zip 바이트를 직접 담아 호출하면 50MB 제한이
+  # 있는데(GeoLite2-City.mmdb는 이미 이를 넘는 경우가 많음), S3를 경유하면 그 제한이 없다.
+  # 함수가 발행 직후 객체를 지우지만, 만약을 대비해 1일 후 자동 만료도 설정해둔다.
+  GeoIpLayerBuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "accesskey-detector-geoip-build-${Stage}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStagingObjects
+            Status: Enabled
+            ExpirationInDays: 1
+
   GeoIpLayerBuilderFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -504,7 +527,10 @@ Resources:
           SECRET_NAME: !Ref MaxMindSecretName
           LAYER_NAME: !Sub "geoip-mmdb-${Stage}"
           PROCESSOR_FUNCTION_NAME: !Ref RefTableProcessorFunction
+          BUILD_BUCKET: !Ref GeoIpLayerBuildBucket
       Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref GeoIpLayerBuildBucket
         - Statement:
             - Sid: GetMaxMindSecret
               Effect: Allow

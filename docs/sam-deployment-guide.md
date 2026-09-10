@@ -331,14 +331,31 @@ aws lambda invoke \
 cat /tmp/geoip-layer-builder-output.json
 ```
 
-`{"status": "updated", ...}`가 나오면 성공입니다. 이후 `ref-table-processor`의 설정을 확인해서
-Layer가 붙었는지 확인할 수 있습니다.
+응답은 세 가지 중 하나입니다.
+
+- `{"status": "updated", "layer_arn": "...", "hash": "..."}` — 성공. 새 Layer 버전을 발행하고
+  `ref-table-processor`에 연결까지 마쳤습니다.
+- `{"status": "skipped", "hash": "..."}` — MaxMind의 최신 해시가 이미 발행된 Layer의 해시와
+  같아서(즉 이미 최신 상태라서) 아무것도 하지 않고 종료했습니다. 정상입니다.
+- 그 외 에러 JSON (`errorMessage` 포함) — 실패. 흔한 원인은 아래와 같습니다.
+
+| 에러 | 원인 / 해결 |
+|---|---|
+| `Secrets Manager` 관련 에러 (`ResourceNotFoundException`, `AccessDenied`) | `MaxMindSecretName`이 가리키는 시크릿이 없거나 값이 `{"MAXMIND_LICENSE_KEY": "..."}` 형식이 아님. 3절대로 시크릿을 다시 생성 |
+| `403`/`401` (MaxMind 다운로드 URL 호출 시) | 라이선스 키가 잘못됐거나 만료됨. MaxMind 계정에서 재발급 |
+| `NoSuchBucket`, `AccessDenied` (S3 업로드 관련) | `GeoIpLayerBuildBucket`이 스택에 정상적으로 생성됐는지 CloudFormation 콘솔에서 확인 |
+| `ValueError: zip 크기(...)가 직접 업로드 한도(50MB)를 초과합니다` | 이전 버전 코드의 잔재입니다. `publish_layer()`는 이제 S3를 경유하도록 바뀌어 이 제한이 없습니다 — 이 에러가 보인다면 아직 옛 코드가 배포되어 있는 것이니 `sam build && sam deploy`로 다시 배포하세요. |
+
+성공했다면 `ref-table-processor`의 설정을 확인해서 Layer가 붙었는지 확인할 수 있습니다.
 
 ```bash
 aws lambda get-function-configuration \
   --function-name ref-table-processor-<Stage값> \
   --query "Layers"
 ```
+
+Layer ARN이 하나 나오면(예: `arn:aws:lambda:<리전>:<계정ID>:layer:geoip-mmdb-<Stage값>:1`)
+정상적으로 연결된 것입니다.
 
 ## 8. 동작 확인
 
@@ -541,6 +558,11 @@ sam delete
     delimiter 기반으로 얕게 탐색해 계정·리전을 자동으로 찾고, (계정+리전)별로 마지막 처리
     위치를 `ref_poll_cursor` 테이블에 저장해 다음 폴링에서 신규 파일만 가져옵니다.
     `CrossAccountS3RoleArn`이 설정된 경우에만 활성화됩니다. (6-2절 참고)
+11. `geoip-layer-builder.py`: `publish_layer()`가 zip 바이트를 `publish_layer_version`
+    요청에 직접 담아 보내던 방식(`Content.ZipFile`, 50MB 제한)을 S3 경유 방식
+    (`Content.S3Bucket`/`S3Key`)으로 바꿨습니다. 최신 `GeoLite2-City.mmdb`는 이미 50MB를
+    넘는 경우가 많아, 원래 코드는 실제로는 거의 항상 실패하는 구조였습니다. 이를 위해
+    스테이징 전용 S3 버킷(`GeoIpLayerBuildBucket`, 1일 후 자동 만료)을 새로 추가했습니다.
 
 **참고로 로직/임계값은 변경하지 않았으므로, 아래 두 가지는 원본 그대로임을 인지하고 있어야 합니다.**
 

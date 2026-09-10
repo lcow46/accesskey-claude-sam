@@ -16,6 +16,7 @@ logging.getLogger('requests.packages.urllib3.connectionpool').setLevel(logging.W
 SECRET_NAME = os.environ["SECRET_NAME"]
 LAYER_NAME = os.environ.get("LAYER_NAME", "geoip-mmdb")
 PROCESSOR_FUNCTION_NAME = os.environ["PROCESSOR_FUNCTION_NAME"]
+BUILD_BUCKET = os.environ["BUILD_BUCKET"]
 
 EDITION_ID = "GeoLite2-City"
 LOCAL_TMP  = "/tmp/"
@@ -23,6 +24,7 @@ CHUNK_SIZE = 1024 * 1024  # 1MB
 
 lambda_client  = boto3.client("lambda")
 secrets_client = boto3.client("secretsmanager")
+s3_client      = boto3.client("s3")
 
 # 콜드스타트 시 1회만 조회 (컨테이너 재사용 시 캐싱)
 _license_key: str | None = None
@@ -89,23 +91,31 @@ def build_zip(mmdb_path: str, zip_path: str):
 
 
 def publish_layer(zip_path: str, db_hash: str) -> str:
-    """zip 파일을 직접 읽어 Layer 새 버전 발행"""
-    with open(zip_path, "rb") as f:
-        zip_bytes = f.read()
-
-    size_mb = len(zip_bytes) / 1024 / 1024
+    """
+    zip 파일을 S3에 올려두고 그 위치를 참조해 Layer 새 버전을 발행한다.
+    publish_layer_version의 Content.ZipFile 방식(요청 본문에 바이트를 직접 담는 방식)은
+    50MB 제한이 있는데, GeoLite2-City.mmdb는 이미 이 한도를 넘는 경우가 많아 그 방식으로는
+    안정적으로 발행할 수 없다. S3 참조 방식은 그 제한이 없다(레이어 자체의 압축 해제 후
+    250MB 한도만 적용됨).
+    """
+    size_mb = os.path.getsize(zip_path) / 1024 / 1024
     log.info(f"Layer 발행 시작 ({size_mb:.1f} MB)")
 
-    if size_mb > 50:
-        raise ValueError(f"zip 크기({size_mb:.1f}MB)가 직접 업로드 한도(50MB)를 초과합니다.")
+    s3_key = f"{EDITION_ID}-{db_hash}.zip"
+    s3_client.upload_file(zip_path, BUILD_BUCKET, s3_key)
+    log.info(f"S3 업로드 완료: s3://{BUILD_BUCKET}/{s3_key}")
 
-    response = lambda_client.publish_layer_version(
-        LayerName=LAYER_NAME,
-        Description=f"hash={db_hash}",
-        Content={"ZipFile": zip_bytes},
-        CompatibleRuntimes=["python3.13", "python3.14"],
-        CompatibleArchitectures=["x86_64", "arm64"],
-    )
+    try:
+        response = lambda_client.publish_layer_version(
+            LayerName=LAYER_NAME,
+            Description=f"hash={db_hash}",
+            Content={"S3Bucket": BUILD_BUCKET, "S3Key": s3_key},
+            CompatibleRuntimes=["python3.13", "python3.14"],
+            CompatibleArchitectures=["x86_64", "arm64"],
+        )
+    finally:
+        # Layer는 발행 시점에 내용을 복사해가므로, 스테이징용 객체는 바로 지워도 된다.
+        s3_client.delete_object(Bucket=BUILD_BUCKET, Key=s3_key)
 
     layer_arn = response["LayerVersionArn"]
     log.info(f"Layer 발행 완료: {layer_arn}")
