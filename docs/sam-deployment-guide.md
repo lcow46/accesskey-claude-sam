@@ -448,7 +448,7 @@ sam delete
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
-| `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정에 만든 역할의 인라인 정책에 `ListBucket`(버킷 자체 ARN)과 `GetObject`(`/*` ARN)가 모두 있는지 확인 |
+| `AccessDenied` (`s3:ListBucket`/`s3:GetObject`, 폴링 모드) | Log Archive 계정 역할의 인라인 정책을 콘솔로 수정하다가 `GetObject` statement를 중복으로 남기고 `ListBucket`을 빠뜨리는 실수가 잦습니다. `aws iam get-role-policy --role-name accesskey-detector-cloudtrail-reader --policy-name read-cloudtrail-logs`로 실제 서버에 저장된 내용을 직접 확인하세요 (콘솔 화면과 다를 수 있습니다) — `ListBucket`은 버킷 자체 ARN(`/*` 없음), `GetObject`는 `/*` 붙은 ARN이어야 합니다 |
 | GeoIP 국가 정보가 계속 빈 값 | `geoip-layer-builder`를 최초 1회 수동 실행했는지, `ref-table-processor`에 Layer가 붙었는지 7단계로 확인 |
 | 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
 | `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
