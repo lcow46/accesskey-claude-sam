@@ -51,40 +51,7 @@ aws configure
 IAM(역할 생성), S3(SAM 배포용 버킷 및 데모 버킷), CloudTrail(데모 모드 사용 시), EventBridge,
 Secrets Manager(읽기), CloudWatch Logs.
 
-### 1-2. Docker 불필요 — 빌드 방식 안내
-
-이 프로젝트는 **Docker를 전혀 사용하지 않습니다.** 사내 정책 등으로 Docker를 쓸 수 없는
-환경을 위해, `template.yaml`의 세 Lambda 함수 모두 SAM의 커스텀 빌드 방식
-(`Metadata.BuildMethod: makefile`)으로 구성되어 있고, 각 함수 소스 폴더(`src/*/Makefile`)에
-빌드 스크립트가 들어있습니다.
-
-일반적으로 `sam build`는 **로컬에 설치된 Python 인터프리터**로 의존성을 설치하기 때문에, 로컬
-Python 버전이 Lambda 런타임(`python3.14`)과 다르면 `Binary validation failed ...` 오류가
-나거나, 이를 피하려면 `sam build --use-container`(Docker 필요)를 써야 하는 것이 SAM의 기본
-동작입니다. 이 프로젝트는 그 대신 각 함수의 Makefile 안에서
-`pip install --platform manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all:`
-같은 **pip의 크로스 플랫폼 다운로드 옵션**을 직접 사용해, 로컬 Python 버전이 무엇이든 상관없이
-Lambda 런타임(Linux x86_64, Python 3.14)에 맞는 wheel을 PyPI에서 바로 받아옵니다. 그 결과
-`make`와 `pip`(그리고 PyPI 접속 가능한 네트워크)만 있으면 되고, Docker도, 정확한 버전의 로컬
-Python도 필요하지 않습니다.
-
-- macOS/Linux에는 보통 `make`가 기본 설치되어 있습니다. (`make --version`으로 확인)
-- 사내 프록시/미러 때문에 `pypi.org`에 직접 접속할 수 없다면, `pip.conf`(또는 `PIP_INDEX_URL`
-  환경변수)로 사내 PyPI 미러를 가리키도록 설정하세요. 사내 미러에도 `geoip2`, `maxminddb`,
-  `requests`의 `manylinux2014_x86_64` / `cp314` wheel이 미러링되어 있어야 이 빌드 방식이
-  그대로 동작합니다.
-- 다른 아키텍처(arm64)로 배포하려면 Makefile의 `PLATFORM` 값을 `manylinux2014_aarch64`로,
-  `template.yaml`의 `Globals.Function.Architectures`를 `[arm64]`로 함께 바꿔야 합니다.
-
-### 1-3. Lambda 런타임 버전이 지원되지 않는 경우
-
-배포하려는 리전/계정에서 아직 `python3.14` Lambda 런타임을 지원하지 않는다면, `template.yaml`의
-`Globals.Function.Runtime`을 `python3.13`으로 낮추고, `src/ref_table_processor/Makefile`과
-`src/geoip_layer_builder/Makefile`의 `PY_VERSION`/`PY_ABI` 값도 `3.13`/`cp313`으로 함께
-맞춰주세요. (Docker를 안 쓰는 이 빌드 방식에서는 코드의 로컬 Python 버전이 아니라, Makefile에
-적힌 `PY_VERSION`/`PY_ABI` 값이 실제로 다운로드되는 wheel의 대상 버전을 결정합니다.)
-
-### 1-4. 알림 채널 준비 (Slack 또는 Teams)
+### 1-2. 알림 채널 준비 (Slack 또는 Teams)
 
 사용할 채널에 맞는 문서를 먼저 진행해서 알림 자격 증명(Slack Bot Token 또는 Teams Webhook
 URL)을 확보해두세요.
@@ -92,7 +59,7 @@ URL)을 확보해두세요.
 - Slack을 사용한다면 → [docs/notifications/slack.md](notifications/slack.md)
 - Microsoft Teams를 사용한다면 → [docs/notifications/teams.md](notifications/teams.md)
 
-### 1-5. MaxMind 계정 준비
+### 1-3. MaxMind 계정 준비
 
 1. [MaxMind](https://www.maxmind.com)에서 계정을 만들고 GeoLite2 라이선스 키를 발급받습니다.
 2. 발급된 라이선스 키 문자열을 확보해둡니다.
@@ -153,7 +120,7 @@ sam build
 ```
 
 `template.yaml`에 이미 각 함수마다 `Metadata: BuildMethod: makefile`이 지정되어 있으므로,
-`sam build`는 자동으로 `src/*/Makefile`을 실행해 의존성을 내려받습니다. (1-2절 참고) 출력에
+`sam build`는 자동으로 `src/*/Makefile`을 실행해 의존성을 내려받습니다. 출력에
 `Running CustomMakeBuilder:MakeBuild`가 보이면 이 방식으로 빌드되고 있는 것입니다.
 
 빌드가 성공하면 `.aws-sam/build/`에 각 함수의 배포 패키지가 생성됩니다. `ref_table_processor`,
@@ -467,7 +434,7 @@ cat /tmp/processor-output.json
 
 DynamoDB/Secrets Manager 호출 이전의 순수 파싱/판단 로직만 빠르게 확인하고 싶다면, 로컬
 가상환경에 의존성을 설치해 핸들러를 직접 import해서 호출할 수 있습니다. 이때는 로컬 머신의
-OS/Python 버전 그대로 설치해도 무방합니다 (배포용 빌드가 아니라 로직 확인용이므로 1-2절의
+OS/Python 버전 그대로 설치해도 무방합니다 (배포용 빌드가 아니라 로직 확인용이므로 Lambda의
 Linux 타깃 제약과 무관합니다).
 
 ```bash
@@ -526,8 +493,8 @@ sam delete
 | 증상 | 원인 / 해결 |
 |---|---|
 | `sam build` 시 `make: pip: command not found` 또는 `python3: command not found` | 빌드 머신에 `make` 또는 `python3`/`pip`이 없음. macOS는 Xcode Command Line Tools(`xcode-select --install`)로 `make`를, Linux는 배포판 패키지 매니저로 `python3`/`python3-pip`을 설치 |
-| `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. 1-2절의 사내 PyPI 미러 설정(`PIP_INDEX_URL` 등)을 확인하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
-| 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. 1-3절대로 `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
+| `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. `pip.conf`/`PIP_INDEX_URL`로 사내 PyPI 미러를 가리키도록 설정하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
+| 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
 | `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
 | `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
@@ -563,7 +530,7 @@ sam delete
    `ref-suspicious-detector` 세 함수 모두 `Metadata: BuildMethod: makefile`로 전환하고
    `src/*/Makefile`을 추가했습니다. 각 Makefile은 `pip install --platform
    manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all:`로 로컬
-   Python 버전과 무관하게 Lambda 런타임에 맞는 의존성을 내려받습니다. (1-2절 참고)
+   Python 버전과 무관하게 Lambda 런타임에 맞는 의존성을 내려받습니다.
 9. `ref-table-processor.py`: Control Tower SCP 등으로 Log Archive 계정의 CloudTrail 버킷
    정책을 편집할 수 없는 환경을 위해, `CROSS_ACCOUNT_S3_ROLE_ARN` 환경변수가 설정되어 있으면
    해당 역할을 `sts:AssumeRole`로 위임받아 S3에 접근하는 `get_s3_client()`를 추가했습니다.
