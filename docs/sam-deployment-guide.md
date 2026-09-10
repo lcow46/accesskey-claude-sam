@@ -412,75 +412,8 @@ sam logs -n ref-suspicious-detector-<Stage값> --stack-name <스택이름> --tai
 [docs/notifications/slack.md](notifications/slack.md) /
 [docs/notifications/teams.md](notifications/teams.md)의 "동작 확인" 절을 참고하세요.
 
-## 9. 로컬 테스트 (Docker 없이)
 
-`sam local invoke`/`sam local start-lambda`는 Lambda 실행 환경을 로컬 컨테이너로 재현하기
-때문에 Docker가 반드시 필요합니다. 이 환경에서는 Docker를 쓸 수 없으므로 아래 두 가지
-대안으로 테스트합니다.
-
-### 9-1. 배포된 함수에 직접 이벤트를 보내서 테스트 (권장)
-
-가장 확실한 방법은 5단계까지 배포한 뒤, `events/` 디렉터리의 샘플 이벤트를 **실제 배포된
-함수**에 `aws lambda invoke`로 직접 보내보는 것입니다. Lambda 실행 환경 자체(Linux, 정확한
-런타임 버전, 실제 IAM 권한)에서 돌아가므로 오히려 `sam local invoke`보다 신뢰도가 높습니다.
-
-```bash
-# ref-suspicious-detector: DynamoDB Streams INSERT 이벤트를 흉내낸 샘플로 테스트
-aws lambda invoke \
-  --function-name ref-suspicious-detector-<Stage값> \
-  --cli-binary-format raw-in-base64-out \
-  --payload file://events/dynamodb-stream-aws-api-insert.json \
-  /tmp/detector-output.json
-cat /tmp/detector-output.json
-```
-
-```bash
-# ref-table-processor: events/s3-put-event.json의 bucket/key 값을
-# 실제 존재하는 CloudTrail 로그 객체로 바꾼 뒤 테스트
-aws lambda invoke \
-  --function-name ref-table-processor-<Stage값> \
-  --cli-binary-format raw-in-base64-out \
-  --payload file://events/s3-put-event.json \
-  /tmp/processor-output.json
-cat /tmp/processor-output.json
-```
-
-테스트 후에는 CloudWatch Logs(8-3절)로 실제 동작을 확인하세요.
-
-### 9-2. 순수 로직만 빠르게 확인 (배포 전, 로컬 venv)
-
-DynamoDB/Secrets Manager 호출 이전의 순수 파싱/판단 로직만 빠르게 확인하고 싶다면, 로컬
-가상환경에 의존성을 설치해 핸들러를 직접 import해서 호출할 수 있습니다. 이때는 로컬 머신의
-OS/Python 버전 그대로 설치해도 무방합니다 (배포용 빌드가 아니라 로직 확인용이므로 Lambda의
-Linux 타깃 제약과 무관합니다).
-
-```bash
-python3 -m venv .venv-test
-source .venv-test/bin/activate
-pip install -r src/ref_table_processor/requirements.txt boto3
-
-python3 - <<'EOF'
-import sys, json
-sys.path.insert(0, "src/ref_table_processor")
-import os
-os.environ.update({
-    "ERROR_EVENT_TABLE": "ref_error_event-dev",
-    "IP_COUNTRY_TABLE": "ref_ip_country-dev",
-    "AWS_API_TABLE": "ref_aws_api-dev",
-    "REGION_TABLE": "ref_region-dev",
-    "USER_AGENT_TABLE": "ref_user_agent-dev",
-})
-import app
-print(app.classify_user_agent("aws-cli/2.15.0"))  # 예: 순수 함수 단위 테스트
-EOF
-deactivate
-```
-
-`app.lambda_handler(event, None)`처럼 핸들러를 직접 호출할 수도 있지만, 그 경우 `boto3`
-호출은 실제 AWS로 나가므로(로컬 자격증명이 설정되어 있어야 함) 9-1절과 사실상 같은 효과이며
-차이는 Lambda 실행 환경을 흉내내지 않는다는 점뿐입니다.
-
-## 10. 스택 삭제
+## 9. 스택 삭제
 
 ```bash
 sam delete
@@ -505,7 +438,7 @@ sam delete
   aws lambda delete-layer-version --layer-name geoip-mmdb-<Stage값> --version-number <버전번호>
   ```
 
-## 11. 트러블슈팅
+## 10. 트러블슈팅
 
 | 증상 | 원인 / 해결 |
 |---|---|
@@ -520,7 +453,7 @@ sam delete
 | 알림이 안 옴 | 채널별 트러블슈팅 표 참고: [slack.md](notifications/slack.md#6-트러블슈팅) / [teams.md](notifications/teams.md#7-트러블슈팅). 공통적으로 CloudWatch Logs에서 `ref-suspicious-detector`의 에러 로그부터 확인 |
 | `AccessDeniedException` (Secrets Manager) | Lambda 실행 역할의 정책 Resource ARN 패턴(`...secret:<시크릿이름>-*`)과 실제 시크릿 이름이 일치하는지 확인 |
 
-## 12. 원본 Lambda 코드 대비 변경 사항
+## 11. 원본 Lambda 코드 대비 변경 사항
 
 제공된 원본 코드(`geoip-layer-builder.py`, `ref-table-processor.py`, `suspicious-detector.py`)를
 재사용 가능한 SAM 템플릿으로 감싸기 위해, 로직은 그대로 두고 **하드코딩된 값만 환경변수로
