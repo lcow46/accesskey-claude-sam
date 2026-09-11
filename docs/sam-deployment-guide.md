@@ -10,6 +10,23 @@ AWS SAM CLI로 빌드·배포하는 방법을 처음부터 끝까지 안내합�
 > [docs/notifications/teams.md](notifications/teams.md)에 각각 정리했습니다. 3단계(Secrets Manager
 > 준비)와 5단계(배포 파라미터)를 진행하기 전에 사용할 채널의 문서를 먼저 읽어주세요.
 
+## 사전 구성 체크리스트
+
+아래 순서대로 진행하면 됩니다. 하나라도 빠뜨리면 배포는 성공해도 실제로는 동작하지 않는
+경우가 많으니(권한 부족, 시크릿 이름 불일치 등), 처음이라면 순서를 건너뛰지 마세요.
+
+| # | 해야 할 일 | 완료 기준 | 참고 절 |
+|---|---|---|---|
+| 1 | AWS CLI, SAM CLI 설치 및 자격증명 설정 | `aws sts get-caller-identity`, `sam --version`이 정상 출력 | 1-1 |
+| 2 | 알림 채널 준비 (Slack Bot Token 또는 Teams Webhook URL 발급) | 토큰/URL을 손에 쥐고 있음 | 1-2, notifications/slack.md 또는 teams.md |
+| 3 | MaxMind 계정 생성 및 GeoLite2 라이선스 키 발급 | 라이선스 키 문자열을 손에 쥐고 있음 | 1-3 |
+| 4 | Secrets Manager에 시크릿 2개 생성 (알림 자격증명, MaxMind 라이선스) | `aws secretsmanager describe-secret`으로 둘 다 조회됨 | 3 |
+| 5 | `sam build && sam deploy --guided`로 첫 배포 | 스택 생성 완료(`CREATE_COMPLETE`) | 4, 5 |
+| 6 | (Organization Trail 연동 시) Log Archive 계정에 크로스 계정 IAM 역할 생성 | 역할에 `sts:AssumeRole` 신뢰 정책 + `s3:ListBucket`(버킷 자체 ARN) + `s3:GetObject`(`/*` ARN) 인라인 정책이 모두 있음 | 6-2 |
+| 7 | `CrossAccountS3RoleArn` 파라미터 지정 후 재배포 | `ref-table-processor`가 폴링 모드로 동작 | 6-2 |
+| 8 | `geoip-layer-builder` 최초 1회 수동 실행 | `ref-table-processor`에 GeoIP Layer가 연결됨 | 7 |
+| 9 | 테스트용 IAM 사용자 + Access Key 발급 후 `scripts/alert_generator.sh` 실행 | DynamoDB에 데이터 적재 + Slack/Teams 알림 수신 | 8 |
+
 ## 0. 이 SAM 앱이 배포하는 범위
 
 Control Tower / Organization Trail 자체는 조직 전체에 걸친 별도 설정이라 하나의 SAM 스택으로
@@ -368,38 +385,106 @@ Layer ARN이 하나 나오면(예: `arn:aws:lambda:<리전>:<계정ID>:layer:geo
 
 ## 8. 동작 확인
 
-### 8-1. 데모 모드: 테스트 이벤트 발생시키기
+이 섹션은 배포한 파이프라인이 실제로 끝까지(CloudTrail → S3 → `ref-table-processor` →
+DynamoDB → Streams → `ref-suspicious-detector` → Slack/Teams) 동작하는지 검증하는 절차입니다.
+[scripts/alert_generator.sh](../scripts/alert_generator.sh)로 시나리오 1·2·4·5에 해당하는
+탐지 이벤트를 직접 발생시켜 확인합니다.
 
-데모 모드로 배포했다면, 실제로 아무 IAM 사용자의 Access Key로 AWS CLI 명령을 몇 번 호출해보면
-(예: `aws sts get-caller-identity`, `aws iam list-users`) 약 5분 내(CloudTrail 배치 주기) 해당
-계정의 CloudTrail 로그가 데모 버킷에 쌓이고, `ref-table-processor`가 트리거됩니다.
+> **왜 굳이 테스트용 IAM 사용자를 새로 만들어야 하나요?**
+> `ref-table-processor`는 `userIdentity.accessKeyId`가 `AKIA`로 시작하는 이벤트만
+> 처리하도록 되어 있습니다 (실제 공격에 쓰이는 것도 이런 장기 IAM 사용자 Access Key이기
+> 때문입니다). 그런데 여러분이 지금 AWS 콘솔에 로그인하거나 CLI를 쓸 때는 대부분 AWS
+> SSO/IAM Identity Center를 통한 **임시 자격증명(Assumed Role)**을 쓰고 있을 텐데, 이 경우
+> Access Key가 `ASIA`로 시작합니다. 즉 지금 로그인된 상태로 아무리 API를 호출해도
+> `ref-table-processor`가 전부 걸러내므로 DynamoDB에는 절대 적재되지 않습니다. 그래서 테스트
+> 때만 쓸 **장기 Access Key를 가진 IAM 사용자**를 별도로 하나 만들어야 합니다.
 
-> **`ref-table-processor`는 `userIdentity.accessKeyId`가 `AKIA`로 시작하는 이벤트만
-> 처리합니다.** AWS SSO/IAM Identity Center로 로그인해서 얻은 임시 자격증명(Assumed
-> Role)의 Access Key는 `ASIA`로 시작하므로 전부 걸러집니다. 즉 SSO 콘솔/CLI 세션으로 아무리
-> API를 호출해도 DynamoDB에는 절대 적재되지 않습니다 — 테스트하려면 반드시 **장기 IAM
-> 사용자 Access Key**(`aws iam create-access-key`로 발급한 것)로 호출해야 합니다.
->
-> ```bash
-> aws iam create-user --user-name accesskey-detector-test-user
-> aws iam create-access-key --user-name accesskey-detector-test-user
-> aws configure --profile akia-test   # 위에서 받은 AKIA 키/시크릿 입력
-> aws sts get-caller-identity --profile akia-test
-> ```
->
-> 테스트가 끝나면 보안을 위해 이 테스트용 키/사용자는 바로 삭제하세요.
->
-> ```bash
-> aws iam delete-access-key --user-name accesskey-detector-test-user --access-key-id <AccessKeyId>
-> aws iam delete-user --user-name accesskey-detector-test-user
-> ```
+### 8-1. 테스트용 IAM 사용자 및 Access Key 준비
 
-### 8-1-B. 폴링 모드(크로스 계정 역할): 수동으로 한 번 실행해보기
+아래는 **관리자 권한이 있는 프로필**(SSO 등)로 실행합니다. 계정은 Organization Trail이
+수집하는 계정이면 어디든 상관없습니다(보통 지금 SAM을 배포한 Audit 계정을 그대로 씁니다).
 
-여기서도 8-1절의 **`AKIA` 전용 필터**가 동일하게 적용됩니다 — SSO 세션(`ASIA`)으로 아무리
-호출해도 적재되지 않으니, 먼저 8-1절 방식으로 실제 `AKIA` 이벤트를 만들어두세요.
+```bash
+aws iam create-user --user-name accesskey-detector-test-user
+aws iam create-access-key --user-name accesskey-detector-test-user
+```
 
-`PollSchedule`(기본 5분) 주기를 기다리지 않고 바로 확인하려면 직접 한 번 호출해봅니다.
+두 번째 명령의 출력에서 `AccessKeyId`(`AKIA...`)와 `SecretAccessKey` 값을 복사해둡니다.
+이 값으로 **테스트 전용 프로필**을 하나 만듭니다 (지금 쓰고 있는 관리자 프로필을 덮어쓰지
+않도록 반드시 이름을 지정하세요).
+
+```bash
+aws configure --profile akia-test
+# AWS Access Key ID: 위에서 복사한 AccessKeyId (AKIA로 시작)
+# AWS Secret Access Key: 위에서 복사한 SecretAccessKey
+# Default region name: ap-northeast-2
+# Default output format: json
+```
+
+확인:
+
+```bash
+aws sts get-caller-identity --profile akia-test
+```
+
+결과의 `Arn`에 `:user/accesskey-detector-test-user`가 보이면 준비가 끝난 것입니다.
+
+> **`aws configure`를 프로필 이름 없이(`--profile` 없이) 실행하면 기본(default) 프로필
+> 자체가 이 테스트 사용자로 바뀝니다.** 그러면 이후 `--profile` 없이 실행하는 다른 모든
+> AWS CLI 명령(DynamoDB 조회, Lambda invoke 등)이 이 권한 없는 테스트 사용자로 실행되어
+> 전부 `AccessDenied`가 납니다. 반드시 위처럼 `--profile akia-test`로 별도 프로필을
+> 만드는 것을 권장합니다.
+
+### 8-2. 테스트 스크립트로 탐지 이벤트 발생시키기
+
+[scripts/alert_generator.sh](../scripts/alert_generator.sh)는 시나리오 1·2·4·5에 해당하는
+API를 실제로 호출해주는 스크립트입니다. (시나리오 3은 `AccessDenied`를 반복 발생시켜야 해서
+별도로 다룹니다 — 8-3절 참고)
+
+```bash
+chmod +x scripts/alert_generator.sh
+./scripts/alert_generator.sh akia-test
+```
+
+인자로 넘긴 이름이 위에서 만든 프로필과 일치해야 합니다. (인자를 생략하면 **기본 프로필**을
+씁니다 — 8-1절의 경고대로 기본 프로필이 진짜 테스트 사용자인 경우에만 그렇게 하세요.)
+
+스크립트가 하는 일:
+
+| 시나리오 | 스크립트가 호출하는 API | 비고 |
+|---|---|---|
+| 1. 초기 정찰 | `GetCallerIdentity`, `ListUserPolicies`, `ListAttachedUserPolicies` | |
+| 2. 권한 상승 | `CreateUser`, `CreateAccessKey`, `AttachUserPolicy`, `PutUserPolicy`, `AddUserToGroup` (대상: `test-backdoor-user`) | 실제로 관리자 권한을 가진 백도어 사용자가 하나 생성됩니다 (8-7절에서 반드시 정리) |
+| 4. 비정상 리전 리소스 생성 | `RunInstances`, `CreateFunction` (오사카 `ap-northeast-3` 리전) | 일부러 잘못된 파라미터(가짜 AMI ID 등)를 써서 실제로 리소스가 생성되지는 않지만, API 호출 자체는 CloudTrail에 정상 기록됩니다 |
+| 5. 공격 도구 시그니처 | User-Agent에 `pacu/1.0`을 넣은 `GetCallerIdentity` | boto3로 직접 호출 |
+
+> 8-1절대로 `accesskey-detector-test-user`에 아무 권한도 붙이지 않았다면, 위 표의 IAM/EC2/Lambda
+> 호출들은 대부분 `AccessDenied`로 실패합니다. **탐지 테스트 목적으로는 이래도 상관없습니다** —
+> CloudTrail은 성공/실패와 무관하게 API 호출 자체(`eventName`, `errorCode` 포함)를 기록하고,
+> `ref-suspicious-detector`의 판단 로직도 호출 성공 여부를 보지 않기 때문입니다. 다만 이 경우
+> 시나리오 2의 `test-backdoor-user`는 실제로 생성되지 않으므로 8-7절의 정리 명령은 그냥
+> "지울 대상 없음"으로 끝납니다. (`test-backdoor-user`가 실제로 만들어지는 것까지 보고 싶다면
+> `accesskey-detector-test-user`에 `IAMFullAccess` 같은 넓은 권한을 임시로 붙이면 되지만,
+> 이는 실제로 위험한 권한을 부여하는 것이므로 신중히 판단하세요.)
+
+### 8-3. (선택) 시나리오 3 — 짧은 시간 내 다수 AccessDenied
+
+권한이 없는 API를 반복 호출해서 인위적으로 발생시킵니다. 같은 `akia-test` 프로필로:
+
+```bash
+for i in $(seq 1 6); do
+  aws s3 ls s3://this-bucket-does-not-exist-and-should-be-denied --profile akia-test 2>/dev/null
+done
+```
+
+`ERROR_THRESHOLD`(기본 5) 이상의 `AccessDenied`가 `ERROR_WINDOW_MIN`(기본 5분) 안에 쌓이면
+알림이 발생합니다.
+
+### 8-4. (폴링 모드) 바로 확인하고 싶다면 강제로 한 번 실행
+
+`PollSchedule`(기본 5분) 주기와 CloudTrail 배치 전송(~5분)을 기다리지 않고 빨리 확인하려면,
+몇 분 뒤 `ref-table-processor`를 직접 한 번 호출해봅니다. (CrossAccountS3RoleArn을 쓰지 않는
+데모/버킷정책 모드라면 이 단계는 필요 없습니다.)
 
 ```bash
 aws lambda invoke \
@@ -409,40 +494,72 @@ aws lambda invoke \
   /tmp/poll-output.json
 ```
 
-CloudWatch Logs(8-3절)에서 처리한 파일 수가 로그로 찍히는지 확인하고, `ref_poll_cursor-<Stage값>`
-테이블에 (계정+리전) prefix별 커서가 생겼는지 확인합니다.
+계정/리전이 많은 조직이라면 한 번의 호출로 전체를 다 못 돌 수 있습니다 — 몇 번 더
+실행하거나 스케줄이 몇 차례 더 도는 것을 기다려주세요. `ref_poll_cursor-<Stage값>` 테이블의
+`__resume_after__` 항목으로 지금 어디까지 돌았는지 확인할 수 있습니다.
 
 ```bash
-aws dynamodb scan --table-name ref_poll_cursor-<Stage값>
+aws dynamodb get-item --table-name ref_poll_cursor-<Stage값> --key '{"prefix":{"S":"__resume_after__"}}'
 ```
 
-### 8-2. DynamoDB 테이블 확인
+### 8-5. DynamoDB에 적재됐는지 확인
 
 ```bash
-aws dynamodb scan --table-name ref_aws_api-<Stage값> --max-items 5
+aws dynamodb scan --table-name ref_aws_api-<Stage값> --max-items 10
+aws dynamodb scan --table-name ref_error_event-<Stage값> --max-items 10
 ```
 
-데이터가 쌓이고 있다면 파이프라인 앞단(S3 → ref-table-processor → DynamoDB)이 정상 동작하는
-것입니다.
-
-### 8-3. CloudWatch Logs로 두 Lambda 로그 확인
+`GetCallerIdentity`, `CreateUser`, `RunInstances` 같은 `eventName`이 보이면 파이프라인
+앞단(S3 → `ref-table-processor` → DynamoDB)이 정상 동작하는 것입니다. 아직 안 보인다면
+CloudWatch Logs부터 확인하세요.
 
 ```bash
 sam logs -n ref-table-processor-<Stage값> --stack-name <스택이름> --tail
 ```
 
+### 8-6. Slack/Teams 알림 확인
+
 ```bash
 sam logs -n ref-suspicious-detector-<Stage값> --stack-name <스택이름> --tail
 ```
 
-### 8-4. 알림 발송 테스트
+- **시나리오 4, 5**는 발신 국가와 무관하므로, DynamoDB에 데이터가 쌓이면 잠시 후 Slack/Teams로
+  바로 알림이 와야 합니다.
+- **시나리오 1, 2**는 `is_foreign_ip`(허용 국가 외부 IP) 조건이 있습니다. 한국(또는
+  `ALLOWED_COUNTRIES`에 포함된 국가)에서 스크립트를 실행했다면 DynamoDB에는 쌓이지만
+  **알림은 오지 않는 것이 정상입니다.** 알림까지 확인하려면 해외 IP(VPN 등)로 실행하거나,
+  테스트 동안만 `ALLOWED_COUNTRIES`를 실제 발신 국가와 다른 값으로 바꿔서 재배포한 뒤
+  다시 시도하고, 확인 후 반드시 원래 값으로 되돌려서 재배포하세요.
+- **시나리오 3**은 국가와 무관하게 임계값만 넘으면 알림이 옵니다.
 
-허용 국가 외부에서 호출한 것처럼 조건을 맞추기는 어려우므로, 가장 쉬운 검증 방법은 `ALLOWED_COUNTRIES`
-환경변수를 일부러 실제 발신 국가와 다르게 좁혀서(예: 테스트 동안만 `US`로) `sam deploy`를 다시
-실행한 뒤, `GetCallerIdentity`를 호출해보고 시나리오 1 알림이 오는지 확인하는 것입니다. 확인 후에는
-반드시 원래 값으로 되돌려서 재배포하세요. 채널별 세부 테스트 방법은
-[docs/notifications/slack.md](notifications/slack.md) /
-[docs/notifications/teams.md](notifications/teams.md)의 "동작 확인" 절을 참고하세요.
+채널별 세부 트러블슈팅은 [docs/notifications/slack.md](notifications/slack.md) /
+[docs/notifications/teams.md](notifications/teams.md)를 참고하세요.
+
+### 8-7. (필수) 테스트 자원 정리
+
+테스트가 끝나면 **반드시** 아래 자원을 정리하세요. 8-2절 안내대로 `accesskey-detector-test-user`에
+아무 권한도 안 붙였다면 `test-backdoor-user`는 애초에 생성되지 않았을 것이므로 첫 블록은
+"삭제할 대상 없음"으로 끝나도 정상입니다 — 만약 넓은 권한을 임시로 부여해서 실제로
+`test-backdoor-user`가 만들어졌다면 `AdministratorAccess`가 붙은 채로 남아있는 진짜 위험
+요소이니 꼭 정리하세요. **아래 명령은 모두 관리자 프로필로 실행합니다** (`test-backdoor-user`
+정리도 마찬가지입니다 — `accesskey-detector-test-user` 자신에게는 기본적으로 다른 IAM 사용자를
+지울 권한이 없습니다).
+
+```bash
+# 시나리오 2에서 생성된 백도어 사용자 정리 (먼저 Access Key/정책을 떼어내야 사용자 삭제가 됨)
+aws iam list-access-keys --user-name test-backdoor-user \
+  --query "AccessKeyMetadata[].AccessKeyId" --output text \
+  | xargs -n1 -I{} aws iam delete-access-key --user-name test-backdoor-user --access-key-id {}
+aws iam detach-user-policy --user-name test-backdoor-user --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+aws iam delete-user-policy --user-name test-backdoor-user --policy-name test-policy
+aws iam delete-user --user-name test-backdoor-user
+
+# 테스트용 IAM 사용자 자신도 정리
+aws iam list-access-keys --user-name accesskey-detector-test-user \
+  --query "AccessKeyMetadata[].AccessKeyId" --output text \
+  | xargs -n1 -I{} aws iam delete-access-key --user-name accesskey-detector-test-user --access-key-id {}
+aws iam delete-user --user-name accesskey-detector-test-user
+```
 
 
 ## 9. 스택 삭제
