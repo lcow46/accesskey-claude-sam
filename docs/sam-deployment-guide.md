@@ -319,29 +319,81 @@ assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 �
 이것으로 Log Archive 계정에서 할 일은 끝입니다. 이 버킷에는 그 외 어떤 설정도(버킷 정책,
 이벤트 알림 등) 추가하지 않습니다.
 
-#### Audit 계정에서 (2) — 크로스 계정 역할 ARN으로 재배포
+#### Audit 계정에서 (2) — Lambda 실행 역할에 직접 정책 추가 (CloudFormation 재배포 없이)
 
-**CloudFormation 콘솔** → **Stacks(스택)** → 이 스택 선택 → **Update(업데이트)**
+스택을 통째로 Update하는 대신, `ref-table-processor`의 실행 역할과 환경변수를 콘솔에서
+직접 건드려서 빠르게 켜는 방법입니다. 대신 아래 세 가지를 **모두** 해줘야 실제로 동작합니다
+— 권한만 추가하고 끝내면 폴링이 시작되지 않습니다.
 
-- **Use current template(현재 템플릿 사용)** 선택 → **Next**
-- **Parameters** 화면에서 `CrossAccountS3RoleArn` 값에 Log Archive 계정에서 복사해둔 역할
-  ARN(`arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader`)을
-  붙여넣기 → **Next**
-- Stack options는 그대로 **Next**
-- 검토 화면에서 **"I acknowledge that AWS CloudFormation might create IAM resources"**
-  체크 → **Update stack(스택 업데이트)**
+**1) 실행 역할에 AssumeRole 권한 추가**
 
-`CrossAccountS3RoleArn`이 채워진 채로 배포되면, 템플릿이 자동으로 EventBridge Schedule
-(`PollSchedule` 파라미터, 기본 5분)을 활성화합니다. `ref-table-processor`는 이 스케줄로
-호출될 때마다 이 역할을 assume해서 버킷을 스캔하고, 마지막으로 처리한 위치를
-`ref_poll_cursor` 테이블에 기억해뒀다가 다음 폴링에서 신규 파일만 가져옵니다
-(`src/ref_table_processor/app.py`의 `get_s3_client()` / `poll_bucket_for_new_logs()` 참고).
-별도로 켜거나 등록할 것은 없습니다.
+**Lambda 콘솔** → `ref-table-processor-<Stage값>` 함수 → **Configuration** → **Permissions**
+→ **Execution role**에 표시된 역할 이름 클릭 (IAM 콘솔로 이동) → **Permissions** 탭 →
+**Add permissions** → **Create inline policy** → **JSON** 탭에 아래 내용 붙여넣기:
 
-> CLI로 재배포하려면 `sam deploy --guided`를 다시 실행해 전체 파라미터를 한 번에 다시
-> 입력하거나, `samconfig.toml`의 `parameter_overrides`에 `CrossAccountS3RoleArn=<위 ARN>`을
-> 직접 추가한 뒤 `sam deploy`를 실행하세요. (이전에 저장된 다른 파라미터가 초기화되지 않도록
-> `sam deploy --parameter-overrides`만 단독으로 넘기지 않도록 주의하세요.)
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader"
+    }
+  ]
+}
+```
+
+정책 이름(예: `AssumeCrossAccountS3RoleManual`)을 정하고 저장합니다.
+
+**2) Lambda 환경변수 직접 추가**
+
+다시 **Lambda 콘솔** → 같은 함수 → **Configuration** → **Environment variables** → **Edit**
+→ 아래 두 개를 추가/수정 후 저장 (`POLL_BUCKET_NAME`은 이미 값이 들어있을 수 있으니 먼저
+확인하세요):
+
+| 키 | 값 |
+|---|---|
+| `CROSS_ACCOUNT_S3_ROLE_ARN` | `arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader` |
+| `POLL_BUCKET_NAME` | `<중앙버킷이름>` (예: `aws-controltower-cloudtrail-logs-...`) |
+
+저장하면 Lambda 설정이 즉시 반영됩니다. 이제 [8-4절](#8-4-폴링-모드-바로-확인하고-싶다면-강제로-한-번-실행)처럼 직접 invoke해서 확인할 수 있습니다.
+
+**3) (자동 주기 실행까지 필요하면) EventBridge 규칙 직접 생성**
+
+이 스택의 EventBridge Schedule(`PollSchedule`)은 CloudFormation **파라미터**
+`CrossAccountS3RoleArn`이 채워져야 만들어지는 조건부 리소스라서, 위 1)·2)만으로는 생기지
+않습니다. 당장은 위 방법으로 필요할 때마다 수동 invoke해서 테스트하면 되지만, 자동으로
+주기 실행까지 원한다면 EventBridge 규칙도 직접 만들 수 있습니다.
+
+```bash
+aws events put-rule \
+  --name ref-table-processor-manual-poll \
+  --schedule-expression "rate(5 minutes)" \
+  --state ENABLED
+
+aws lambda add-permission \
+  --function-name ref-table-processor-<Stage값> \
+  --statement-id AllowEventBridgeManualPoll \
+  --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn arn:aws:events:<리전>:<Audit계정ID>:rule/ref-table-processor-manual-poll
+
+aws events put-targets \
+  --rule ref-table-processor-manual-poll \
+  --targets "Id=1,Arn=arn:aws:lambda:<리전>:<Audit계정ID>:function:ref-table-processor-<Stage값>"
+```
+
+> **주의 — 이 방식은 CloudFormation이 관리하는 상태와 어긋나게(drift) 됩니다.** 콘솔/CLI로
+> 직접 바꾼 환경변수는, 나중에 `CrossAccountS3RoleArn` 파라미터를 채우지 않은 채로
+> `sam deploy`를 다시 실행하면 스택 정의(빈 값)로 **덮어써져 사라질 수 있습니다.** IAM
+> 인라인 정책(1번)은 이름이 겹치지 않는 한 보통 유지되지만, 환경변수(2번)와 지금 만든
+> EventBridge 규칙(3번)은 SAM 템플릿이 전혀 모르는 리소스라서 관리되지 않습니다. 동작을
+> 확인한 뒤에는, `samconfig.toml`의 `parameter_overrides`에 `CrossAccountS3RoleArn=<위
+> ARN>`을 반영해서 한 번은 정식으로 `sam deploy`를 실행해 두는 것을 권장합니다 — 그래야
+> 이후 재배포 때 방금 수동으로 만든 설정이 사라지지 않고, EventBridge 스케줄도 템플릿이
+> 정식으로 관리하는 리소스로 정리됩니다 (그 시점에 위 3번에서 수동으로 만든 규칙은
+> `aws events remove-targets`/`delete-rule`로 지워서 중복 실행되지 않게 하세요).
 
 ## 7. 배포 후 필수 수동 단계: GeoIP Layer 최초 생성
 
