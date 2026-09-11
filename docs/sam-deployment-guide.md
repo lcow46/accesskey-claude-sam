@@ -591,6 +591,7 @@ sam delete
 
 | 증상 | 원인 / 해결 |
 |---|---|
+| `sam deploy` 시 `Unable to upload artifact ...: S3 Bucket does not exist` (관리형 버킷 재사용 시 재시도해도 반복됨) | `aws-sam-cli-managed-default` 스택을 지웠다가 다시 배포하는 등, 관리형 S3 버킷이 새로 만들어진 직후에 로컬 `samconfig.toml`이 예전 상태를 캐싱하고 있어서 생깁니다. `rm samconfig.toml` 후 `sam deploy --guided`로 파라미터를 처음부터 다시 입력하면 해결됩니다 (5-1절 참고) |
 | `sam build` 시 `make: pip: command not found` 또는 `python3: command not found` | 빌드 머신에 `make` 또는 `python3`/`pip`이 없음. macOS는 Xcode Command Line Tools(`xcode-select --install`)로 `make`를, Linux는 배포판 패키지 매니저로 `python3`/`python3-pip`을 설치 |
 | `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. `pip.conf`/`PIP_INDEX_URL`로 사내 PyPI 미러를 가리키도록 설정하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
 | 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
