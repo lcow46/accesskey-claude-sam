@@ -323,26 +323,23 @@ Log Archive 계정에서 만든 역할의 ARN을 이 스택의 `CrossAccountS3Ro
 Schedule(`PollSchedule`)을 활성화하는 것까지 전부 템플릿이 자동으로 처리합니다 —
 직접 건드릴 필요가 없습니다.
 
-**1) samconfig.toml에 파라미터 값 반영**
+**1) 재배포**
 
-프로젝트 루트의 `samconfig.toml`을 열어 `[default.deploy.parameters]`의
-`parameter_overrides` 줄에서 `CrossAccountS3RoleArn` 값을 채우거나, 없다면 이어 붙입니다.
-
-```toml
-parameter_overrides = "Stage=\"dev\" ... CrossAccountS3RoleArn=\"arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader\""
-```
-
-직접 파일을 고치는 대신 전체 파라미터를 대화형으로 다시 입력하고 싶다면
-`sam deploy --guided`를 실행해도 됩니다 (이번엔 `CrossAccountS3RoleArn` 항목에 이 ARN을
-입력).
-
-**2) 재배포**
+`samconfig.toml`을 직접 편집하는 대신, `sam deploy --guided`로 다시 실행해서
+`CrossAccountS3RoleArn` 항목에만 Log Archive 계정에서 복사해둔 ARN을 입력하세요. 나머지
+항목은 이전에 입력한 값이 기본값으로 표시되므로 그대로 Enter만 누르면 됩니다.
 
 ```bash
-sam build && sam deploy
+sam build && sam deploy --guided
 ```
 
-**3) 확인**
+`CrossAccountS3RoleArn` 파라미터를 물어보면 아래처럼 입력합니다.
+
+```
+arn:aws:iam::<LogArchive계정ID>:role/accesskey-detector-cloudtrail-reader
+```
+
+**2) 확인**
 
 ```bash
 aws lambda get-function-configuration \
