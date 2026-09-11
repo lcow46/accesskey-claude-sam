@@ -17,15 +17,16 @@ AWS SAM CLI로 빌드·배포하는 방법을 처음부터 끝까지 안내합�
 
 | # | 해야 할 일 | 완료 기준 | 참고 절 |
 |---|---|---|---|
-| 1 | AWS CLI, SAM CLI 설치 및 자격증명 설정 | `aws sts get-caller-identity`, `sam --version`이 정상 출력 | 1-1 |
-| 2 | 알림 채널 준비 (Slack Bot Token 또는 Teams Webhook URL 발급) | 토큰/URL을 손에 쥐고 있음 | 1-2, notifications/slack.md 또는 teams.md |
-| 3 | MaxMind 계정 생성 및 GeoLite2 라이선스 키 발급 | 라이선스 키 문자열을 손에 쥐고 있음 | 1-3 |
+| 1 | AWS CLI, SAM CLI 설치 및 자격증명 설정 | `aws sts get-caller-identity`, `sam --version`이 정상 출력 | 2-1 |
+| 2 | 알림 채널 준비 (Slack Bot Token 또는 Teams Webhook URL 발급) | 토큰/URL을 손에 쥐고 있음 | 2-2, notifications/slack.md 또는 teams.md |
+| 3 | MaxMind 계정 생성 및 GeoLite2 라이선스 키 발급 | 라이선스 키 문자열을 손에 쥐고 있음 | 2-3 |
 | 4 | Secrets Manager에 시크릿 2개 생성 (알림 자격증명, MaxMind 라이선스) | `aws secretsmanager describe-secret`으로 둘 다 조회됨 | 3 |
-| 5 | `sam build && sam deploy --guided`로 첫 배포 | 스택 생성 완료(`CREATE_COMPLETE`) | 4, 5 |
-| 6 | (Organization Trail 연동 시) Log Archive 계정에 크로스 계정 IAM 역할 생성 | 역할에 `sts:AssumeRole` 신뢰 정책 + `s3:ListBucket`(버킷 자체 ARN) + `s3:GetObject`(`/*` ARN) 인라인 정책이 모두 있음 | 6-2 |
-| 7 | `CrossAccountS3RoleArn` 파라미터 지정 후 재배포 | `ref-table-processor`가 폴링 모드로 동작 | 6-2 |
-| 8 | `geoip-layer-builder` 최초 1회 수동 실행 | `ref-table-processor`에 GeoIP Layer가 연결됨 | 7 |
-| 9 | 테스트용 IAM 사용자 + Access Key 발급 후 `scripts/alert_generator.sh` 실행 | DynamoDB에 데이터 적재 + Slack/Teams 알림 수신 | 8 |
+| 5 | 중앙 CloudTrail 버킷 이름/소유 계정 ID 확인 | Log Archive 계정의 버킷 이름과 계정 ID를 손에 쥐고 있음 | 1-2 |
+| 6 | `sam build && sam deploy --guided`로 첫 배포 | 스택 생성 완료(`CREATE_COMPLETE`) | 4, 5 |
+| 7 | Log Archive 계정에 크로스 계정 IAM 역할 생성 | 역할에 `sts:AssumeRole` 신뢰 정책 + `s3:ListBucket`(버킷 자체 ARN) + `s3:GetObject`(`/*` ARN) 인라인 정책이 모두 있음 | 6 |
+| 8 | `CrossAccountS3RoleArn` 파라미터 지정 후 재배포 | `ref-table-processor`가 폴링 모드로 동작 | 6 |
+| 9 | `geoip-layer-builder` 최초 1회 수동 실행 | `ref-table-processor`에 GeoIP Layer가 연결됨 | 7 |
+| 10 | 테스트용 IAM 사용자 + Access Key 발급 후 `scripts/alert_generator.sh` 실행 | DynamoDB에 데이터 적재 + Slack/Teams 알림 수신 | 8 |
 
 ## 0. 이 SAM 앱이 배포하는 범위
 
@@ -34,24 +35,79 @@ Control Tower / Organization Trail 자체는 조직 전체에 걸친 별도 설�
 
 ![실제 구현된 아키텍처](images/architecture-drawio-preview.png)
 
-편집 가능한 원본은 [images/architecture.drawio](images/architecture.drawio)이며, [draw.io](https://app.diagrams.net)에서 열 수 있습니다. (`docs/architecture.md`의 구성도는 최초 설계 당시의 개념도이고, 이 다이어그램은 6-2절의 크로스 계정 역할 + 폴링 방식으로 실제 구현된 최종 모습을 반영합니다.)
+편집 가능한 원본은 [images/architecture.drawio](images/architecture.drawio)이며, [draw.io](https://app.diagrams.net)에서 열 수 있습니다. (`docs/architecture.md`의 구성도는 최초 설계 당시의 개념도이고, 이 다이어그램은 6절의 크로스 계정 역할 + 폴링 방식으로 실제 구현된 최종 모습을 반영합니다.)
 
 | 리소스 | 설명 |
 |---|---|
-| `ref-table-processor` Lambda | S3(CloudTrail 로그) → Reference Table 5종 적재. S3 이벤트 알림(데모/버킷정책 모드) 또는 EventBridge 폴링(크로스 계정 역할 모드)으로 트리거 |
+| `ref-table-processor` Lambda | EventBridge 스케줄로 주기 실행되며, 중앙 CloudTrail 버킷을 폴링해서 Reference Table 5종에 적재 |
 | `ref-suspicious-detector` Lambda | DynamoDB Streams → 탐지 시나리오 평가 → Slack/Teams 알림 |
 | `geoip-layer-builder` Lambda | MaxMind mmdb 갱신 확인 → Lambda Layer 재발행 → `ref-table-processor`에 자동 연결 (주기 실행) |
 | DynamoDB 테이블 5종 | `ref_ip_country`, `ref_region`, `ref_user_agent`, `ref_error_event`, `ref_aws_api` |
-| DynamoDB `ref_poll_cursor` 테이블 | 폴링 모드에서 (계정+리전)별 마지막 처리 위치를 저장 (다른 모드에서는 비어있음) |
-| (선택) 데모용 S3 버킷 + CloudTrail | Organization 환경이 없어도 엔드투엔드로 테스트할 수 있도록 하는 옵션 |
+| DynamoDB `ref_poll_cursor` 테이블 | (계정+리전)별 마지막 처리 위치를 저장해 다음 폴링에서 신규 파일만 가져오게 함 |
 
-실제 운영 환경(Control Tower + Organization Trail)에서는 CloudTrail 로그가 **다른 계정(Log
-Archive)의 S3 버킷**에 쌓이므로, 그 버킷에서 이 스택의 Lambda를 호출하도록 하는 크로스 계정 설정이
-별도로 필요합니다. 이 가이드의 "5. 배포 후 수동 설정"에서 다룹니다.
+CloudTrail 로그는 **다른 계정(Log Archive)의 S3 버킷**에 쌓이므로, 그 버킷에서 이 스택의
+Lambda가 데이터를 읽어올 수 있도록 하는 크로스 계정 설정이 별도로 필요합니다. 어떤 방식으로
+연동하는지는 1-2절에서, 실제 설정 절차는 6절에서 다룹니다.
 
-## 1. 사전 준비물
+## 1. 프로젝트 구조
 
-### 1-1. 도구 설치
+### 1-1. 디렉터리 구조
+
+```
+accesskey-claude-sam/
+├── template.yaml                     # SAM 템플릿 (전체 인프라 정의)
+├── src/
+│   ├── ref_table_processor/
+│   │   ├── app.py
+│   │   ├── requirements.txt          # geoip2, maxminddb
+│   │   └── Makefile                  # Docker 없이 빌드하기 위한 커스텀 빌드 스크립트
+│   ├── suspicious_detector/
+│   │   ├── app.py                    # 표준 라이브러리 + boto3만 사용
+│   │   └── Makefile                  # 의존성 없음 — 소스 복사만 수행
+│   └── geoip_layer_builder/
+│       ├── app.py
+│       ├── requirements.txt          # requests
+│       └── Makefile
+├── scripts/
+│   └── alert_generator.sh            # 8절 동작 확인용 탐지 이벤트 발생 스크립트
+├── events/                           # sam local invoke 대체 테스트용 샘플 이벤트
+└── docs/
+    ├── architecture.md
+    ├── sam-deployment-guide.md       # 이 문서
+    └── notifications/
+        ├── slack.md
+        └── teams.md
+```
+
+### 1-2. CloudTrail 연동 방식
+
+이 스택은 **Organization Trail이 이미 구성되어 있고, CloudTrail 로그가 Log Archive 계정의
+중앙 S3 버킷에 쌓이고 있다는 것을 전제**로 합니다 (Control Tower 환경이라면 기본적으로 이렇게
+되어 있습니다). 버킷이 **다른 AWS 계정**에 있으므로 CloudFormation 스택 하나만으로는 양쪽을
+다 설정할 수 없고, 이 프로젝트는 다음과 같은 방식으로 연동합니다.
+
+- **버킷 정책은 건드리지 않습니다.** Control Tower 환경의 CloudTrail 버킷은 감사 로그 보호를
+  위해 버킷 정책 변경이 SCP로 막혀있는 경우가 대부분이라, 애초에 그 방식은 선택지가 아닙니다.
+- 대신 Log Archive 계정에 **크로스 계정 IAM 역할**을 하나 만들어두면, `ref-table-processor`가
+  그 역할을 assume해서 마치 같은 계정에서 접근하는 것처럼 S3를 읽습니다.
+- **S3 이벤트 알림도 쓰지 않습니다** (버킷에 알림을 등록하는 것도 같은 이유로 SCP에 막히는
+  경우가 많습니다). 대신 EventBridge 스케줄(`PollSchedule`, 기본 5분)로 `ref-table-processor`가
+  주기적으로 버킷을 직접 스캔(폴링)해서 새 로그 파일을 찾아옵니다.
+
+```
+Audit 계정 (EventBridge Schedule)
+  → ref-table-processor Lambda
+      → AssumeRole
+        → Log Archive 계정의 크로스 계정 역할
+          → S3 ListBucket / GetObject (같은 계정 접근으로 처리됨)
+```
+
+이 역할을 실제로 만들고 스택에 연결하는 절차는 6절에서 다룹니다. 지금은 이런 구조로
+동작한다는 것만 이해하고 넘어가면 됩니다.
+
+## 2. 사전 준비물
+
+### 2-1. 도구 설치
 
 ```bash
 # AWS CLI v2 (설치 여부 확인)
@@ -69,10 +125,9 @@ aws configure
 ```
 
 배포를 실행할 IAM 사용자/역할에는 최소한 다음 권한이 필요합니다: CloudFormation, Lambda, DynamoDB,
-IAM(역할 생성), S3(SAM 배포용 버킷 및 데모 버킷), CloudTrail(데모 모드 사용 시), EventBridge,
-Secrets Manager(읽기), CloudWatch Logs.
+IAM(역할 생성), S3(SAM 배포용 버킷), EventBridge, Secrets Manager(읽기), CloudWatch Logs.
 
-### 1-2. 알림 채널 준비 (Slack 또는 Teams)
+### 2-2. 알림 채널 준비 (Slack 또는 Teams)
 
 사용할 채널에 맞는 문서를 먼저 진행해서 알림 자격 증명(Slack Bot Token 또는 Teams Webhook
 URL)을 확보해두세요.
@@ -80,36 +135,10 @@ URL)을 확보해두세요.
 - Slack을 사용한다면 → [docs/notifications/slack.md](notifications/slack.md)
 - Microsoft Teams를 사용한다면 → [docs/notifications/teams.md](notifications/teams.md)
 
-### 1-3. MaxMind 계정 준비
+### 2-3. MaxMind 계정 준비
 
 1. [MaxMind](https://www.maxmind.com)에서 계정을 만들고 GeoLite2 라이선스 키를 발급받습니다.
 2. 발급된 라이선스 키 문자열을 확보해둡니다.
-
-## 2. 프로젝트 구조
-
-```
-accesskey-claude-sam/
-├── template.yaml                     # SAM 템플릿 (전체 인프라 정의)
-├── src/
-│   ├── ref_table_processor/
-│   │   ├── app.py
-│   │   ├── requirements.txt          # geoip2, maxminddb
-│   │   └── Makefile                  # Docker 없이 빌드하기 위한 커스텀 빌드 스크립트
-│   ├── suspicious_detector/
-│   │   ├── app.py                    # 표준 라이브러리 + boto3만 사용
-│   │   └── Makefile                  # 의존성 없음 — 소스 복사만 수행
-│   └── geoip_layer_builder/
-│       ├── app.py
-│       ├── requirements.txt          # requests
-│       └── Makefile
-├── events/                           # sam local invoke 대체 테스트용 샘플 이벤트
-└── docs/
-    ├── architecture.md
-    ├── sam-deployment-guide.md       # 이 문서
-    └── notifications/
-        ├── slack.md
-        └── teams.md
-```
 
 ## 3. 배포 전 준비: Secrets Manager 시크릿 생성
 
@@ -166,7 +195,9 @@ file .aws-sam/build/RefTableProcessorFunction/maxminddb/*.so
 sam deploy --guided
 ```
 
-대화형으로 아래 항목들을 물어봅니다.
+대화형으로 아래 항목들을 물어봅니다. `ExistingCloudTrailBucketName`/`AccountId`는 이미 알고
+있는 값이니 첫 배포 때 바로 채우면 되고, `CrossAccountS3RoleArn`만 6절에서 역할을 만든 뒤
+채워서 한 번 더 재배포합니다.
 
 | 항목 | 권장 값/설명 |
 |---|---|
@@ -182,16 +213,17 @@ sam deploy --guided
 | Parameter ErrorThreshold | 시나리오 3 임계값 (기본 5) |
 | Parameter ErrorWindowMinutes | 시나리오 3 시간 윈도우(분) (기본 5) |
 | Parameter GeoIpUpdateSchedule | GeoIP DB 갱신 주기 (기본 `rate(7 days)`) |
-| Parameter DeployDemoCloudTrail | **처음 테스트해보는 것이라면 `true`** 권장 (아래 6절 참고) |
-| Parameter ExistingCloudTrailBucketName / AccountId | `DeployDemoCloudTrail=false`일 때만 입력 |
-| Parameter CrossAccountS3RoleArn | `DeployDemoCloudTrail=false`일 때 사용. 처음 배포할 때는 비워두고, 6-2절에서 역할을 만든 뒤 재배포 시 지정. 지정하면 폴링 모드가 자동으로 켜짐 |
-| Parameter PollSchedule | 폴링 모드(위 파라미터 지정 시)의 버킷 스캔 주기 (기본 `rate(5 minutes)`) |
+| Parameter DeployDemoCloudTrail | **`false`로 고정.** `true`(기본값)로 두면 이 스택이 쓰지도 않을 자체 데모용 S3 버킷과 CloudTrail을 추가로 만듭니다 |
+| Parameter ExistingCloudTrailBucketName | Log Archive 계정의 중앙 CloudTrail 버킷 이름 |
+| Parameter ExistingCloudTrailBucketAccountId | 그 버킷을 소유한 계정 ID (Log Archive 계정) |
+| Parameter CrossAccountS3RoleArn | 처음 배포할 때는 비워두고, 6절에서 역할을 만든 뒤 재배포 시 지정. 지정하면 폴링 모드가 자동으로 켜짐 |
+| Parameter PollSchedule | 버킷 스캔 주기 (기본 `rate(5 minutes)`) |
 | Confirm changes before deploy | `Y` 권장 (변경 내용을 보고 승인) |
 | Allow SAM CLI IAM role creation | `Y` (Lambda 실행 역할 등을 생성해야 함) |
 | Disable rollback | `N` |
 | Save arguments to configuration file | `Y` → 다음부터는 `sam deploy`만으로 재배포 가능 |
 
-배포가 끝나면 `Outputs`에 함수 이름/ARN, 테이블 이름, (데모 모드면) 버킷 이름이 출력됩니다.
+배포가 끝나면 `Outputs`에 함수 이름/ARN, 테이블 이름이 출력됩니다.
 
 ### 5-2. 이후 재배포
 
@@ -201,57 +233,21 @@ sam build && sam deploy
 
 (`--guided`로 저장된 `samconfig.toml`을 그대로 사용합니다.)
 
-## 6. 배포 모드: 데모 모드 vs 기존 Organization Trail 연동
+## 6. 크로스 계정 설정
 
-### 6-1. 데모 모드 (`DeployDemoCloudTrail=true`, 기본값)
+1-2절에서 설명한 대로, Log Archive 계정에 크로스 계정 IAM 역할을 만들고 그 ARN을 이 스택에
+알려주는 절차입니다. 아래 작업은 계정이 서로 다르므로, 어느 계정 콘솔에서 진행하는지 각
+단계마다 명시했습니다. 반드시 표시된 계정으로 콘솔 우측 상단에서 전환(스위치 롤/SSO 계정
+변경)한 뒤 진행하세요.
 
-이 스택이 자체 S3 버킷과 단일 계정 CloudTrail(멀티 리전)을 함께 만들어서, Organization Trail
-없이도 혼자서 전체 파이프라인을 끝까지 테스트해볼 수 있습니다. **처음 이 아키텍처를 구현해보는
-용도라면 이 모드로 시작하는 것을 권장합니다.**
-
-데모 모드에서는 S3 이벤트 알림이 같은 계정/같은 스택 안에서 자동으로 연결되므로 별도 수동 설정이
-필요 없습니다. (7단계로 바로 진행)
-
-### 6-2. 기존 Organization Trail 연동 모드 (`DeployDemoCloudTrail=false`)
-
-실제 운영 중인 Control Tower/Organization Trail의 Log Archive 계정 버킷과 연동하려면 이 모드를
-사용합니다. `ExistingCloudTrailBucketName`(중앙 버킷 이름)과
-`ExistingCloudTrailBucketAccountId`(그 버킷을 소유한 계정 ID)를 지정해야 합니다.
-
-버킷이 **다른 AWS 계정**에 있으므로, CloudFormation 한 스택만으로는 양쪽을 다 설정할 수
-없습니다. **Log Archive 계정에서 해야 할 일은 크로스 계정 IAM 역할을 하나 만드는 것,
-그것뿐입니다.** S3 이벤트 알림은 등록하지 않습니다 — `ref-table-processor`는 이 역할이
-지정되면 S3 알림을 기다리는 대신, EventBridge 스케줄로 주기 실행되면서 스스로 버킷을
-스캔해 새 로그 파일을 찾아옵니다(폴링). Control Tower SCP가 버킷 알림 등록(`s3:PutBucket
-Notification`)까지 막는 경우가 많아 애초에 알림에 의존하지 않는 방식입니다.
-
-읽기 권한은 **크로스 계정 IAM 역할**로 부여합니다. Log Archive 계정의 버킷 정책 자체는
-건드리지 않습니다. Log Archive 계정에 IAM 역할을 하나 만들고 `ref-table-processor`가 그
-역할을 assume해서 S3에 접근하게 합니다. 역할을 assume한 시점부터는 임시 자격증명이 Log
-Archive 계정 소속이 되므로 같은 계정 접근과 동일하게 처리되고, 버킷 정책 수정이 필요
-없습니다.
-
-전체 흐름은 이렇습니다.
-
-```
-Audit 계정 (EventBridge Schedule)
-  → ref-table-processor Lambda
-      → AssumeRole
-        → Log Archive 계정의 accesskey-detector-cloudtrail-reader 역할
-          → S3 ListBucket / GetObject (같은 계정 접근으로 처리됨)
-```
-
-**아래 작업은 계정이 서로 다르므로, 어느 계정 콘솔에서 진행하는지 각 단계마다 명시했습니다.
-반드시 표시된 계정으로 콘솔 우측 상단에서 전환(스위치 롤/SSO 계정 변경)한 뒤 진행하세요.**
-
-#### Audit 계정에서 (1) — Lambda 실행 역할 확인
+### Audit 계정에서 (1) — Lambda 실행 역할 확인
 
 **Lambda 콘솔** → 함수 목록에서 `ref-table-processor-<Stage값>` 클릭 → **Configuration(구성)**
 탭 → **Permissions(권한)** → **Execution role(실행 역할)** 섹션에 표시된 역할 이름을 클릭하면
 IAM 콘솔로 이동합니다. 그 페이지 상단의 **ARN**을 복사해둡니다. (뒤에서 Log Archive 쪽 신뢰
 정책에 사용)
 
-#### Log Archive 계정에서 — 크로스 계정 역할 생성
+### Log Archive 계정에서 — 크로스 계정 역할 생성
 
 **역할은 반드시 이 계정(버킷을 소유한 계정) 안에 만들어야 합니다.** Audit 계정에 만들면
 동작하지 않습니다 — Audit 계정에 만든 역할은 Log Archive 계정 소속이 아니므로, 그 역할을
@@ -319,7 +315,7 @@ assume해도 여전히 "다른 계정에서 접근"하는 것이 되어 버킷 �
 이것으로 Log Archive 계정에서 할 일은 끝입니다. 이 버킷에는 그 외 어떤 설정도(버킷 정책,
 이벤트 알림 등) 추가하지 않습니다.
 
-#### Audit 계정에서 (2) — 크로스 계정 역할 ARN 설정 후 재배포
+### Audit 계정에서 (2) — 크로스 계정 역할 ARN 설정 후 재배포
 
 Log Archive 계정에서 만든 역할의 ARN을 이 스택의 `CrossAccountS3RoleArn` 파라미터에
 지정하면 끝입니다. Lambda 실행 역할에 `sts:AssumeRole` 권한을 붙이는 것, 환경변수
@@ -494,11 +490,10 @@ done
 `ERROR_THRESHOLD`(기본 5) 이상의 `AccessDenied`가 `ERROR_WINDOW_MIN`(기본 5분) 안에 쌓이면
 알림이 발생합니다.
 
-### 8-4. (폴링 모드) 바로 확인하고 싶다면 강제로 한 번 실행
+### 8-4. 바로 확인하고 싶다면 강제로 한 번 실행
 
 `PollSchedule`(기본 5분) 주기와 CloudTrail 배치 전송(~5분)을 기다리지 않고 빨리 확인하려면,
-몇 분 뒤 `ref-table-processor`를 직접 한 번 호출해봅니다. (CrossAccountS3RoleArn을 쓰지 않는
-데모/버킷정책 모드라면 이 단계는 필요 없습니다.)
+몇 분 뒤 `ref-table-processor`를 직접 한 번 호출해봅니다.
 
 ```bash
 aws lambda invoke \
@@ -575,7 +570,6 @@ aws iam list-access-keys --user-name accesskey-detector-test-user \
 aws iam delete-user --user-name accesskey-detector-test-user
 ```
 
-
 ## 9. 스택 삭제
 
 ```bash
@@ -585,14 +579,6 @@ sam delete
 삭제 시 주의할 점:
 
 - DynamoDB 테이블은 삭제되며 **누적된 탐지 데이터도 함께 사라집니다.**
-- 데모 모드(`DeployDemoCloudTrail=true`)로 배포했다면, S3 버킷에 CloudTrail 로그 객체가 남아있는
-  경우 버킷이 비어있지 않아 삭제가 실패할 수 있습니다. 이 경우 먼저 버킷을 비운 뒤 다시
-  `sam delete`를 실행하세요.
-
-  ```bash
-  aws s3 rm s3://accesskey-detector-demo-trail-<Stage값>-<계정ID> --recursive
-  ```
-
 - `geoip-layer-builder`가 발행한 Lambda Layer(`geoip-mmdb-<Stage값>`)는 CloudFormation이 관리하지
   않으므로(동적으로 발행되었기 때문에) 스택을 삭제해도 남아있습니다. 필요 없다면 별도로 정리하세요.
 
@@ -609,8 +595,7 @@ sam delete
 | `sam build` 시 `make: pip: command not found` 또는 `python3: command not found` | 빌드 머신에 `make` 또는 `python3`/`pip`이 없음. macOS는 Xcode Command Line Tools(`xcode-select --install`)로 `make`를, Linux는 배포판 패키지 매니저로 `python3`/`python3-pip`을 설치 |
 | `sam build` 시 pip이 wheel을 못 받아옴 (타임아웃, `Could not find a version`) | 사내 네트워크에서 `pypi.org` 접속이 막혀있을 가능성. `pip.conf`/`PIP_INDEX_URL`로 사내 PyPI 미러를 가리키도록 설정하고, 그 미러에 `manylinux2014_x86_64`/`cp314` wheel이 있는지 확인 |
 | 배포 시 `Unsupported runtime` 오류 | 해당 리전에 아직 `python3.14` Lambda 런타임이 제공되지 않음. `template.yaml`의 Runtime과 각 Makefile의 `PY_VERSION`/`PY_ABI`를 함께 `python3.13`/`3.13`/`cp313`으로 낮춰서 재배포 |
-| `ref-table-processor`가 트리거되지 않음 (데모 모드) | S3 버킷 NotificationConfiguration이 실제로 등록됐는지 `aws s3api get-bucket-notification-configuration --bucket <버킷명>`으로 확인 |
-| `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 (폴링 모드) | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
+| `ref-table-processor`가 실행은 되는데 새 파일을 못 찾음 | EventBridge 규칙(`PollSchedule`)이 활성화되어 있는지, CloudWatch Logs에서 `poll_bucket_for_new_logs` 관련 에러(권한 부족 등)가 있는지 확인 |
 | `ref-table-processor` 로그에 `[폴링] AWSLogs 루트 0개 발견`만 찍히고 실행 시간이 100ms 미만으로 매우 짧음 | 버킷의 실제 최상위 구조가 `AWSLogs/`도 `<OrgId>/AWSLogs/`도 아닌 경우입니다. S3 콘솔에서 버킷 루트 폴더 구조를 직접 확인하고, `find_awslogs_prefixes()`의 `depth` 상한(현재 2단계)을 늘려야 할 수도 있습니다 |
 | "총 N개 이벤트 파싱 시작" 로그는 찍히는데 원하는 계정의 데이터가 안 보임 | 조직에 계정/리전이 많으면 한 번의 폴링으로 전부 못 돌 수 있습니다. `ref_poll_cursor-<Stage값>` 테이블에서 `__resume_after__` 항목의 값을 확인해 지금 어디까지 순환했는지 보고, 몇 차례(스케줄 주기만큼) 더 기다리거나 강제로 여러 번 invoke 해보세요 |
 | `AccessDenied` (`sts:AssumeRole`, `CrossAccountS3RoleArn` 사용 시) | Log Archive 계정 쪽 역할의 신뢰 정책(trust policy) Principal이 Audit 계정의 `RefTableProcessorFunctionRole` ARN과 정확히 일치하는지 확인 |
@@ -651,18 +636,18 @@ sam delete
 9. `ref-table-processor.py`: Control Tower SCP 등으로 Log Archive 계정의 CloudTrail 버킷
    정책을 편집할 수 없는 환경을 위해, `CROSS_ACCOUNT_S3_ROLE_ARN` 환경변수가 설정되어 있으면
    해당 역할을 `sts:AssumeRole`로 위임받아 S3에 접근하는 `get_s3_client()`를 추가했습니다.
-   설정하지 않으면 기존과 동일하게 자기 자신의 실행 역할로 S3에 접근합니다. (6-2절 참고)
+   설정하지 않으면 기존과 동일하게 자기 자신의 실행 역할로 S3에 접근합니다. (6절 참고)
 10. `ref-table-processor.py`: S3 이벤트 알림 자체가 SCP로 막혀있는 환경을 위해, S3 Records가
     없는 호출(EventBridge Schedule)을 받으면 `poll_bucket_for_new_logs()`로 버킷을 직접
     스캔하는 폴링 모드를 추가했습니다. `AWSLogs/<Org>/<Account>/CloudTrail/<Region>/` 구조를
     delimiter 기반으로 얕게 탐색해 계정·리전을 자동으로 찾고, (계정+리전)별로 마지막 처리
     위치를 `ref_poll_cursor` 테이블에 저장해 다음 폴링에서 신규 파일만 가져옵니다.
-    `CrossAccountS3RoleArn`이 설정된 경우에만 활성화됩니다. (6-2절 참고)
+    `CrossAccountS3RoleArn`이 설정된 경우에만 활성화됩니다. (6절 참고)
 
     **버킷 구조 관련 주의:** Control Tower 랜딩존 버전에 따라 `AWSLogs/`가 버킷 루트에 바로
     있는 경우도 있고, 조직 ID 폴더가 한 번 더 감싸는 경우(`<OrgId>/AWSLogs/<OrgId>/...`)도
     있습니다. `find_awslogs_prefixes()`가 최대 2단계까지 내려가며 `AWSLogs/` 폴더를 찾으므로
-    두 구조 모두 자동으로 처리되지만, 폴링이 계속 아무것도 처리하지 못한다면(아래 트러블슈팅
+    두 구조 모두 자동으로 처리되지만, 폴링이 계속 아무것도 처리하지 못한다면(위 트러블슈팅
     참고) 실제 버킷 구조가 이 두 패턴과도 다른 건 아닌지 콘솔에서 직접 확인해보세요.
 11. `geoip-layer-builder.py`: `publish_layer()`가 zip 바이트를 `publish_layer_version`
     요청에 직접 담아 보내던 방식(`Content.ZipFile`, 50MB 제한)을 S3 경유 방식
